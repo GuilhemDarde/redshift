@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv
+.env
+
+# Jupyter Notebooks checkpoints
+.ipynb_checkpoints
+
+# Données (IMPORTANT)
+data/
+datasets/
+*.csv
+*.zip
+*.tar.gz
+
+# Modèles et logs (Trop lourds pour git)
+*.pt
+*.pth
+*.ckpt
+runs/
+logs/
+wandb/
+models/
+
+# VS Code settings (optionnel)
+.vscode/
