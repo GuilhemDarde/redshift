@@ -13,9 +13,7 @@ def visualize_generated_samples(checkpoint_path, target_z, target_mag):
     device = torch.device(CONFIG.DEVICE if torch.cuda.is_available() else "cpu")
     print(f"Chargement du modèle depuis {checkpoint_path}...")
     
-    # 1. Initialiser le modèle CFM
-    # Note: num_timesteps ici définit la discrétisation pour l'entraînement, 
-    # mais pour l'inférence on choisira le nombre de pas d'Euler (ex: 50).
+    # Initialisation CFM
     model = ConditionalFlowMatching(num_timesteps=100).to(device)
     
     # Charger les poids
@@ -28,25 +26,24 @@ def visualize_generated_samples(checkpoint_path, target_z, target_mag):
 
     model.eval()
     
-    # 2. Préparation de la condition
+    # Préparation
     # On crée un batch de 4 exemples identiques pour voir la variabilité du bruit
     n_samples = 4
     z_tensor = torch.tensor([[target_z]] * n_samples, device=device).float()
     
     # Normalisation mag identique au training (Centrée Réduite)
-    # Rappel: Dans train.py on fait (m - MEAN) / STD
     m_norm_val = (target_mag - CONFIG.MAG_MEAN) / CONFIG.MAG_STD
     m_tensor = torch.tensor([[m_norm_val]] * n_samples, device=device).float()
     
     print(f"Génération pour z={target_z}, mag_i={target_mag} (norm={m_norm_val:.2f})...")
     
-    # 3. Génération (Inférence ODE)
+    # Génération
     with torch.no_grad():
         # generate renvoie [B, 6, 64, 64]
         # On utilise 50 pas d'Euler pour une bonne qualité
         generated = model.generate(z_tensor, m_tensor, num_steps=50)
         
-    # 4. Visualisation
+    # Visualisation
     # Les images sont normalisées avec asinh lors du chargement.
     # Pour visualiser, on peut faire l'inverse : sinh(x)
     if CONFIG.ASINH_NORM:
@@ -70,7 +67,6 @@ def visualize_generated_samples(checkpoint_path, target_z, target_mag):
     output_file = f"sample_z{target_z}_m{target_mag}.png"
     plt.savefig(output_file)
     print(f"Image sauvegardée : {output_file}")
-    # plt.show() # Décommenter si vous avez un affichage graphique
 
 if __name__ == "__main__":
     ckpt = os.path.join(CONFIG.EXP_FOLDER, "cfm_model_epoch_100.pt")

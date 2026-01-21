@@ -6,13 +6,13 @@ class Config:
     """
 
     DATA_PATH = "/home/barrage/SPECT_COSMOS_US/us/" 
-    EXP_FOLDER = "./experiments/cfm_v1/"
-    
+    EXP_FOLDER = "/home/hugo/experiments/cfm_v1/"    
     # Paramètres données
     I_MIN = 18.0
     I_MAX = 25.0
     Z_MAX = 6.0
-
+    
+    # 0 : u, 1 : g, 2 : r, 3 : i, 4 : z, 5 : y
     CHANNELS = [0, 1, 2, 3, 4, 5] 
     
     IMG_SIZE = 64
