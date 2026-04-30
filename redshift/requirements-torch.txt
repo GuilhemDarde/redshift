@@ -1,0 +1,4 @@
+-r requirements-core.txt
+torch>=2.0.0,<2.5
+torchvision>=0.15.0,<0.20
+escnn>=1.0.0

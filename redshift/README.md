@@ -11,13 +11,31 @@ Pipeline de recherche pour l'estimation de redshift photometrique sur COSMOS ave
 Le projet est un ensemble de scripts Python. Les chemins de donnees ne sont pas inclus dans le depot.
 
 ```bash
-python3.8 -m venv "$HOME/venvs/redshift"
-source "$HOME/venvs/redshift/bin/activate"
+export REDSHIFT_ENV=/chemin/avec/espace/venvs/redshift
+export PIP_CACHE_DIR=/chemin/avec/espace/pip-cache
+export TMPDIR=/chemin/avec/espace/tmp
+mkdir -p "$PIP_CACHE_DIR" "$TMPDIR" "$(dirname "$REDSHIFT_ENV")"
+
+python3.8 -m venv "$REDSHIFT_ENV"
+source "$REDSHIFT_ENV/bin/activate"
 python -m pip install --upgrade pip setuptools wheel
-python -m pip install -r requirements.txt
+python -m pip install --no-cache-dir -r requirements.txt
 ```
 
-Ne pas installer dans un environnement partage non inscriptible du type `/home/grp1/.../lib/python3.8/site-packages`. Si `pip` renvoie `Permission denied`, recreer un venv dans `$HOME` ou un espace projet ou vous avez les droits, puis relancer l'installation. Les versions de `numpy/scipy/matplotlib/astropy` sont bornees pour rester compatibles avec Python 3.8 et `escnn/pymanopt`.
+Ne pas installer dans un environnement partage non inscriptible du type `/home/grp1/.../lib/python3.8/site-packages`. Si `pip` renvoie `Permission denied`, recreer un venv dans un espace ou vous avez les droits. Si `pip` renvoie `No space left on device`, placer `REDSHIFT_ENV`, `PIP_CACHE_DIR` et `TMPDIR` sur un disque projet/scratch avec plusieurs Go libres: les wheels CUDA de PyTorch sont volumineux.
+
+Les dependances sont separees:
+
+- `redshift/requirements-core.txt`: analyse, figures, FITS, CSV, sans PyTorch.
+- `redshift/requirements-torch.txt`: pile complete pour entrainements Torch/G-CNN.
+- `requirements.txt`: installation complete par defaut.
+
+Si le serveur fournit deja PyTorch via un module ou un environnement central, activer ce module puis installer seulement les dependances manquantes:
+
+```bash
+python -m pip install --no-cache-dir -r redshift/requirements-core.txt
+python -m pip install --no-cache-dir escnn
+```
 
 Pour une execution reproductible, declarer explicitement les chemins locaux:
 
