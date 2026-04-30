@@ -11,10 +11,13 @@ Pipeline de recherche pour l'estimation de redshift photometrique sur COSMOS ave
 Le projet est un ensemble de scripts Python. Les chemins de donnees ne sont pas inclus dans le depot.
 
 ```bash
-conda create -n redshift python=3.10
-conda activate redshift
-pip install -r requirements.txt
+python3.8 -m venv "$HOME/venvs/redshift"
+source "$HOME/venvs/redshift/bin/activate"
+python -m pip install --upgrade pip setuptools wheel
+python -m pip install -r requirements.txt
 ```
+
+Ne pas installer dans un environnement partage non inscriptible du type `/home/grp1/.../lib/python3.8/site-packages`. Si `pip` renvoie `Permission denied`, recreer un venv dans `$HOME` ou un espace projet ou vous avez les droits, puis relancer l'installation. Les versions de `numpy/scipy/matplotlib/astropy` sont bornees pour rester compatibles avec Python 3.8 et `escnn/pymanopt`.
 
 Pour une execution reproductible, declarer explicitement les chemins locaux:
 
