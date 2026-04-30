@@ -1,7 +1,7 @@
 import argparse
 import logging
 import os
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -12,6 +12,7 @@ from torch.cuda import amp
 from config import CONFIG
 from data_loader import get_dataloaders
 from backbone import GalaxyEquivariantMDN, MDNLoss
+from analysis_utils import compute_regression_metrics, ensure_dir, write_rows_csv
 from utils import set_global_seed
 
 import torch.multiprocessing as mp
@@ -58,7 +59,7 @@ def train_one_model(model_idx: int, args: argparse.Namespace, train_real: DataLo
     appels : os.path.join, os.path.exists, torch.load, GalaxyEquivariantMDN, optim.Adam, MDNLoss, amp.GradScaler, amp.autocast, torch.save
     outputs : torch.nn.Module
     '''
-    model_path = CONFIG.exp_path(f"sota_model_gcnn_mdn_{model_idx}.pt")
+    model_path = os.path.join(args.output_dir, f"sota_model_gcnn_mdn_fold{args.fold_id if args.fold_id is not None else 'default'}_{model_idx}.pt")
     model = GalaxyEquivariantMDN(num_gaussians=args.num_gaussians, use_meta=False).to(device)
     
     if os.path.exists(model_path):
@@ -83,7 +84,9 @@ def train_one_model(model_idx: int, args: argparse.Namespace, train_real: DataLo
         model.train()
         for ep in range(epochs):
             losses = []
-            for batch in loader:
+            for batch_idx, batch in enumerate(loader):
+                if args.limit_batches is not None and batch_idx >= args.limit_batches:
+                    break
                 x = batch[0].to(device, non_blocking=True)
                 z = (batch[1][:, 0] if batch[1].dim() > 1 else batch[1]).to(device, non_blocking=True)
                 
@@ -104,7 +107,7 @@ def train_one_model(model_idx: int, args: argparse.Namespace, train_real: DataLo
     logger.info(f"   Modèle sauvegardé : {model_path}")
     return model
 
-def predict_ensemble(models: List[torch.nn.Module], loader: DataLoader, device: torch.device) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+def predict_ensemble(models: List[torch.nn.Module], loader: DataLoader, device: torch.device, limit_batches: Optional[int] = None) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     '''
     actions : Exécute une inférence parallélisée sur l'ensemble de modèles pour quantifier les incertitudes totales.
     inputs : models (List[torch.nn.Module]), loader (DataLoader), device (torch.device)
@@ -115,7 +118,9 @@ def predict_ensemble(models: List[torch.nn.Module], loader: DataLoader, device: 
     for m in models: m.eval()
 
     with torch.no_grad():
-        for batch in loader:
+        for batch_idx, batch in enumerate(loader):
+            if limit_batches is not None and batch_idx >= limit_batches:
+                break
             x = batch[0].to(device, non_blocking=True)
             z = batch[1][:, 0] if batch[1].dim() > 1 else batch[1]
             z_trues.append(z.numpy())
@@ -132,6 +137,9 @@ def predict_ensemble(models: List[torch.nn.Module], loader: DataLoader, device: 
             mus_all.append(np.stack(b_mus))
             vars_all.append(np.stack(b_vars))
 
+    if not z_trues:
+        raise RuntimeError("Aucun batch evalue. Verifiez le dataset, le split test ou --limit_batches.")
+
     z_t = np.concatenate(z_trues, axis=0)
     m_s = np.concatenate(mus_all, axis=1)
     v_s = np.concatenate(vars_all, axis=1)
@@ -146,22 +154,34 @@ def run_sota_experiment(args: argparse.Namespace) -> None:
     outputs : None
     '''
     set_global_seed(args.seed)
+    args.output_dir = ensure_dir(args.output_dir or CONFIG.EXP_FOLDER)
     device = torch.device(CONFIG.DEVICE)
     synthetic_path = args.synthetic_path or CONFIG.exp_path(CONFIG.SYNTHETIC_100K)
     syn_loader = load_synthetic_loader(synthetic_path, args.batch_size)
-    train_real, _, test_real = get_dataloaders(batch_size=args.batch_size, num_workers=CONFIG.NUM_WORKERS)
+    train_real, _, test_real = get_dataloaders(
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+        region=args.region,
+        n_folds=args.n_folds if args.fold_id is not None else None,
+        fold_id=args.fold_id,
+    )
 
     models = [train_one_model(i, args, train_real, syn_loader, device) for i in range(args.n_models)]
 
     logger.info(">>> Évaluation de l'Ensemble G-CNN MDN (Inférence AMP)...")
-    z_true, z_pred, z_sigma = predict_ensemble(models, test_real, device)
+    z_true, z_pred, z_sigma = predict_ensemble(models, test_real, device, limit_batches=args.limit_batches)
     dz = (z_pred - z_true) / (1.0 + z_true)
     nmad = 1.4826 * np.median(np.abs(dz - np.median(dz)))
     outliers = np.mean(np.abs(dz) > 0.15) * 100.0
+    metrics = compute_regression_metrics(z_true, z_pred, z_sigma)
+    metrics.update({"fold_id": args.fold_id if args.fold_id is not None else -1, "region": args.region})
 
     logger.info(f"--- RÉSULTATS FINAUX ---")
     logger.info(f"Sigma NMAD : {nmad:.5f} | Outliers : {outliers:.2f}%")
-    np.savez(CONFIG.exp_path(CONFIG.SOTA_RESULTS), z_true=z_true, z_pred=z_pred, z_sigma=z_sigma)
+    suffix = f"_fold{args.fold_id}" if args.fold_id is not None else ""
+    np.savez(os.path.join(args.output_dir, f"predictions_sota_ensemble{suffix}.npz"), z_true=z_true, z_pred=z_pred, z_sigma=z_sigma)
+    np.savez(os.path.join(args.output_dir, CONFIG.SOTA_RESULTS), z_true=z_true, z_pred=z_pred, z_sigma=z_sigma)
+    write_rows_csv(os.path.join(args.output_dir, f"metrics_sota_ensemble{suffix}.csv"), [metrics])
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -171,6 +191,12 @@ if __name__ == "__main__":
     parser.add_argument("--num_gaussians", type=int, default=5)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--batch_size", type=int, default=CONFIG.SYNTH_BATCH_SIZE)
+    parser.add_argument("--num_workers", type=int, default=CONFIG.NUM_WORKERS)
     parser.add_argument("--seed", type=int, default=CONFIG.SEED)
     parser.add_argument("--synthetic_path", type=str, default=None)
+    parser.add_argument("--region", choices=["all", "stripe82"], default="all")
+    parser.add_argument("--n_folds", type=int, default=CONFIG.N_FOLDS)
+    parser.add_argument("--fold_id", type=int, default=None)
+    parser.add_argument("--limit_batches", type=int, default=None)
+    parser.add_argument("--output_dir", type=str, default=None)
     run_sota_experiment(parser.parse_args())

@@ -22,6 +22,7 @@ Pour une execution reproductible, declarer explicitement les chemins locaux:
 export COSMOS_DATA_PATH=/chemin/vers/les/fichiers_npz_cosmos
 export COSMOS_MORPHO_PATH=/chemin/vers/catalogue_morpho_cosmos.fits
 export COSMOS_EXP_FOLDER=/chemin/vers/le/dossier_experiences
+export COSMOS_METADATA_PATH=/chemin/optionnel/vers/dataset_metadata.npz
 export COSMOS_SEED=42
 export COSMOS_NUM_WORKERS=2
 export COSMOS_SYNTH_NUM_WORKERS=4
@@ -33,6 +34,7 @@ Les chemins, seeds, batch sizes, workers et noms d'artefacts canoniques sont cen
 
 - `config.py`: configuration globale, chemins, bornes de selection, constantes et hyperparametres par defaut.
 - `data_loader.py`: chargement COSMOS, filtrage, cross-match morphologique et split spatial train/val/test.
+- `analysis_utils.py`: metriques, binning, masque Stripe82, exports metadata et helpers CSV.
 - `model.py`: CFM conditionnel, U-Net leger et perte photometrique.
 - `backbone.py`: G-CNN equivariant et tete MDN pour l'estimation probabiliste du redshift.
 - `train.py`: entrainement du generateur CFM.
@@ -40,6 +42,11 @@ Les chemins, seeds, batch sizes, workers et noms d'artefacts canoniques sont cen
 - `experiment_backbone.py`: pre-entrainement synthetique, fine-tuning reel et rapport statistique.
 - `experiment_sota.py`: ensemble G-CNN/MDN avec evaluation NMAD/outliers.
 - `experiment_uncertainty.py`: analyse PIT de la calibration.
+- `analyze_dataset.py`: audit dataset, split, distributions, flags, bandes U/I/Z.
+- `analyze_results.py`: heatmaps, agrégations par `z_pred`, bande I et cartes RA/DEC.
+- `experiment_cnn_bins.py`: CNN de classification par bins de redshift.
+- `experiment_marie_baseline.py`: baseline locale style Marie, fichiers originaux intacts.
+- `experiment_marie_gcnn.py`: premières couches G-CNN + tête style Marie.
 - `utils.py`: visualisations et metriques communes.
 
 ## Donnees Attendues
@@ -65,6 +72,7 @@ Utiliser ce protocole pour produire un resultat comparable et archivable.
 2. Construire le split
    - Le split est spatial et deterministe par RA dans `data_loader.py`.
    - Les proportions canoniques sont 80% train, 10% validation, 10% test.
+   - Les folds optionnels sont des blocs RA deterministes via `--n_folds` et `--fold_id`.
    - Les filtres canoniques sont `I_MIN <= i <= I_MAX`, `0.001 < z <= Z_MAX`, flags nuls sur les canaux selectionnes, puis cross-match morphologique a 1 arcsec.
    - Reporter dans le journal du run le nombre d'objets train/val/test apres filtrage et cross-match.
 
@@ -72,7 +80,7 @@ Utiliser ce protocole pour produire un resultat comparable et archivable.
    - Commande canonique:
 
 ```bash
-python train.py --epochs 100 --batch_size 64 --lr 1e-4 --lambda_photo 0.01 --seed "$COSMOS_SEED"
+python redshift/train.py --epochs 100 --batch_size 64 --lr 1e-4 --lambda_photo 0.01 --seed "$COSMOS_SEED"
 ```
 
    - Checkpoint attendu: `cfm_model_physics.pt` dans `COSMOS_EXP_FOLDER`.
@@ -81,7 +89,7 @@ python train.py --epochs 100 --batch_size 64 --lr 1e-4 --lambda_photo 0.01 --see
    - Commande canonique:
 
 ```bash
-python generate_mass.py --n 100000 --batch_size 256 --seed "$COSMOS_SEED"
+python redshift/generate_mass.py --n 100000 --batch_size 256 --seed "$COSMOS_SEED"
 ```
 
    - Dataset attendu: `synthetic_cosmos_100k_v3.npz` ou chemin passe avec `--output`.
@@ -90,7 +98,7 @@ python generate_mass.py --n 100000 --batch_size 256 --seed "$COSMOS_SEED"
    - Commande canonique:
 
 ```bash
-python experiment_sota.py --epochs_syn 45 --ft_epochs 15 --n_models 5 --num_gaussians 5 --batch_size 128 --seed "$COSMOS_SEED"
+python redshift/experiment_sota.py --epochs_syn 45 --ft_epochs 15 --n_models 5 --num_gaussians 5 --batch_size 128 --seed "$COSMOS_SEED"
 ```
 
    - Resultat attendu: `results_sota_ensemble.npz` dans `COSMOS_EXP_FOLDER`.
@@ -100,13 +108,13 @@ python experiment_sota.py --epochs_syn 45 --ft_epochs 15 --n_models 5 --num_gaus
    - PIT:
 
 ```bash
-python experiment_uncertainty.py --epochs 15 --num_gaussians 3 --batch_size 128 --seed "$COSMOS_SEED"
+python redshift/experiment_uncertainty.py --epochs 15 --num_gaussians 3 --batch_size 128 --seed "$COSMOS_SEED"
 ```
 
    - Couleurs:
 
 ```bash
-python validation_colors.py
+python redshift/validation_colors.py
 ```
 
 7. Archiver les resultats
@@ -118,34 +126,59 @@ python validation_colors.py
 
 ## Commandes
 
+Les commandes suivantes sont donnees depuis la racine du depot.
+
+Audit dataset:
+
+```bash
+python redshift/analyze_dataset.py --region all
+python redshift/analyze_dataset.py --region stripe82 --max_files 2
+```
+
 Entrainer le generateur CFM:
 
 ```bash
-python train.py --epochs 100 --batch_size 64 --lr 1e-4 --lambda_photo 0.01 --seed "$COSMOS_SEED"
+python redshift/train.py --epochs 100 --batch_size 64 --lr 1e-4 --lambda_photo 0.01 --seed "$COSMOS_SEED"
 ```
 
 Generer un dataset synthetique:
 
 ```bash
-python generate_mass.py --n 100000 --batch_size 256 --seed "$COSMOS_SEED"
+python redshift/generate_mass.py --n 100000 --batch_size 256 --seed "$COSMOS_SEED"
 ```
 
 Lancer l'experience ensemble G-CNN/MDN:
 
 ```bash
-python experiment_sota.py --epochs_syn 45 --ft_epochs 15 --n_models 5 --num_gaussians 5 --batch_size 128 --seed "$COSMOS_SEED"
+python redshift/experiment_sota.py --epochs_syn 45 --ft_epochs 15 --n_models 5 --num_gaussians 5 --batch_size 128 --seed "$COSMOS_SEED" --region all
+python redshift/experiment_sota.py --epochs_syn 1 --ft_epochs 1 --n_models 1 --limit_batches 2 --fold_id 0
+```
+
+Analyser les resultats:
+
+```bash
+python redshift/analyze_results.py --results "$COSMOS_EXP_FOLDER/results_sota_ensemble.npz"
+```
+
+Nouvelles experiences demandees:
+
+```bash
+python redshift/experiment_cnn_bins.py --epochs 10 --region all
+python redshift/experiment_marie_baseline.py --epochs 10 --region all
+python redshift/experiment_marie_gcnn.py --epochs 10 --region all
+python redshift/experiment_cnn_bins.py --epochs 1 --region stripe82 --limit_batches 2
 ```
 
 Analyser la calibration PIT:
 
 ```bash
-python experiment_uncertainty.py --epochs 15 --num_gaussians 3 --batch_size 128 --seed "$COSMOS_SEED"
+python redshift/experiment_uncertainty.py --epochs 15 --num_gaussians 3 --batch_size 128 --seed "$COSMOS_SEED"
 ```
 
 Lancer les smoke tests sans donnees lourdes:
 
 ```bash
-python -m unittest discover -s tests -v
+python -m unittest discover -s redshift/tests -v
 ```
 
 ## Reproductibilite

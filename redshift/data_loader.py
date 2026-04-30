@@ -1,7 +1,7 @@
 import glob
 import logging
 import os
-from typing import Dict, Tuple
+from typing import Dict, Optional, Tuple
 
 import numpy as np
 import torch
@@ -10,6 +10,7 @@ from astropy.table import Table
 import astropy.units as u
 from torch.utils.data import DataLoader, Dataset, Subset
 
+from analysis_utils import apply_region_mask, compute_split_indices, save_metadata_csv, save_metadata_npz, split_labels
 from config import CONFIG
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -22,9 +23,18 @@ class CosmosDataset(Dataset):
     appels : glob.glob, os.path.join, self._load_morpho_catalog, self._load_and_process
     outputs : Instance de CosmosDataset
     '''
-    def __init__(self, data_dir: str = CONFIG.DATA_PATH, morpho_path: str = CONFIG.MORPHO_PATH) -> None:
-        self.files = glob.glob(os.path.join(data_dir, "*.npz"))
+    def __init__(
+        self,
+        data_dir: str = CONFIG.DATA_PATH,
+        morpho_path: str = CONFIG.MORPHO_PATH,
+        region: str = "all",
+        max_files: Optional[int] = None,
+    ) -> None:
+        self.files = sorted(glob.glob(os.path.join(data_dir, "*.npz")))
+        if max_files is not None:
+            self.files = self.files[:max_files]
         self.morpho_path = morpho_path
+        self.region = region
         self.morpho_data = self._load_morpho_catalog()
         self.data = self._load_and_process()
 
@@ -80,7 +90,7 @@ class CosmosDataset(Dataset):
 
         logger.info(f"Traitement et Cross-Matching de {len(self.files)} fichiers...")
 
-        all_x, all_cond_base, all_re, all_n, all_ra = [], [], [], [], []
+        all_x, all_cond_base, all_re, all_n, all_ra, all_dec, all_flags, all_mags = [], [], [], [], [], [], [], []
         
         morpho_coords = self.morpho_data['coords']
         morpho_re = self.morpho_data['re']
@@ -97,6 +107,9 @@ class CosmosDataset(Dataset):
 
                     if info.dtype.names:
                         info.dtype.names = tuple([name.lower() for name in info.dtype.names])
+                    else:
+                        logger.warning("Champ info non structure dans %s, fichier ignore.", f)
+                        continue
                     names = info.dtype.names
 
                     z_key = 'z_spec' if 'z_spec' in names else 'zspec'
@@ -109,15 +122,17 @@ class CosmosDataset(Dataset):
                     mask_base = (info['i'] >= CONFIG.I_MIN) & (info['i'] <= CONFIG.I_MAX) & \
                                 (info[z_key] > 0.001) & (info[z_key] <= CONFIG.Z_MAX)
 
+                    flags_all = None
                     if 'flag' in raw.files:
-                        flags = raw['flag'][:, CONFIG.CHANNELS]
-                        mask_base = mask_base & (np.sum(flags, axis=1) == 0)
+                        flags_all = raw['flag'][:, CONFIG.CHANNELS]
+                        mask_base = mask_base & (np.sum(flags_all, axis=1) == 0)
 
                     if np.sum(mask_base) == 0:
                         continue
 
                     cube_valid = cube[mask_base][:, :, :, CONFIG.CHANNELS]
                     info_valid = info[mask_base]
+                    flags_valid = flags_all[mask_base] if flags_all is not None else np.full((len(info_valid), len(CONFIG.CHANNELS)), np.nan)
                     
                     batch_coords = SkyCoord(ra=info_valid[ra_key]*u.deg, dec=info_valid[dec_key]*u.deg)
                     idx, d2d, _ = batch_coords.match_to_catalog_sky(morpho_coords)
@@ -132,14 +147,21 @@ class CosmosDataset(Dataset):
                         cube_matched = np.arcsinh(cube_matched)
 
                     info_matched = info_valid[match_mask]
+                    flags_matched = flags_valid[match_mask]
                     matched_idx = idx[match_mask]
 
                     z_spec = info_matched[z_key]
                     mag_i = info_matched['i']
+                    ra_matched = info_matched[ra_key]
+                    dec_matched = info_matched[dec_key]
 
                     g = info_matched['g'] if 'g' in names else mag_i
                     r = info_matched['r'] if 'r' in names else mag_i
                     z_phot = info_matched['z'] if 'z' in names else mag_i
+                    mags = np.stack(
+                        [info_matched[b] if b in names else np.full_like(mag_i, np.nan, dtype=np.float64) for b in CONFIG.BAND_NAMES],
+                        axis=1,
+                    )
 
                     c1 = g - r
                     c2 = r - mag_i
@@ -151,11 +173,23 @@ class CosmosDataset(Dataset):
                         c1, c2, c3
                     ], axis=1)
 
-                    all_x.append(cube_matched)
-                    all_cond_base.append(cond_base)
-                    all_re.append(morpho_re[matched_idx])
-                    all_n.append(morpho_n[matched_idx])
-                    all_ra.append(info_matched[ra_key])
+                    metadata_for_region = {
+                        "ra": np.asarray(ra_matched),
+                        "dec": np.asarray(dec_matched),
+                        "z_true": np.asarray(z_spec),
+                    }
+                    region_mask = apply_region_mask(metadata_for_region, self.region)
+                    if np.sum(region_mask) == 0:
+                        continue
+
+                    all_x.append(cube_matched[region_mask])
+                    all_cond_base.append(cond_base[region_mask])
+                    all_re.append(morpho_re[matched_idx][region_mask])
+                    all_n.append(morpho_n[matched_idx][region_mask])
+                    all_ra.append(ra_matched[region_mask])
+                    all_dec.append(dec_matched[region_mask])
+                    all_flags.append(flags_matched[region_mask])
+                    all_mags.append(mags[region_mask])
 
             except Exception as e:
                 logger.warning(f"Erreur de traitement sur le fichier {f} : {e}")
@@ -169,6 +203,9 @@ class CosmosDataset(Dataset):
         re_concat = np.concatenate(all_re, axis=0)
         n_concat = np.concatenate(all_n, axis=0)
         ra_concat = np.concatenate(all_ra, axis=0)
+        dec_concat = np.concatenate(all_dec, axis=0)
+        flags_concat = np.concatenate(all_flags, axis=0)
+        mags_concat = np.concatenate(all_mags, axis=0)
 
         log_re = np.log10(re_concat)
         mu_re = np.mean(log_re)
@@ -189,7 +226,14 @@ class CosmosDataset(Dataset):
         data = {
             'x': x_concat,
             'cond': cond_final,
-            'ra': ra_concat
+            'ra': ra_concat,
+            'dec': dec_concat,
+            'z_true': cond_base_concat[:, 0],
+            'mag_i': cond_base_concat[:, 1] * 2.0 + 22.0,
+            'mags': mags_concat,
+            'flags': flags_concat,
+            're_norm': r_norm,
+            'n_norm': n_norm,
         }
 
         logger.info(f"Dataset chargé et matché : {len(data['cond'])} objets restants. Conditionnement Dim={cond_final.shape[1]}.")
@@ -216,24 +260,67 @@ class CosmosDataset(Dataset):
         cond = torch.tensor(self.data['cond'][idx], dtype=torch.float32)
         return x, cond
 
-def get_dataloaders(batch_size: int = CONFIG.BATCH_SIZE, num_workers: int = CONFIG.NUM_WORKERS) -> Tuple[DataLoader, DataLoader, DataLoader]:
+def build_metadata(dataset: CosmosDataset, split_indices: Optional[Dict[str, np.ndarray]] = None) -> Dict[str, np.ndarray]:
+    metadata = {
+        "ra": dataset.data["ra"],
+        "dec": dataset.data["dec"],
+        "z_true": dataset.data["z_true"],
+        "mag_i": dataset.data["mag_i"],
+        "re_norm": dataset.data["re_norm"],
+        "n_norm": dataset.data["n_norm"],
+    }
+    mags = dataset.data["mags"]
+    flags = dataset.data["flags"]
+    for idx, band in enumerate(CONFIG.BAND_NAMES):
+        metadata[f"mag_{band}"] = mags[:, idx]
+        metadata[f"flag_{band}"] = flags[:, idx]
+    if split_indices is not None:
+        metadata["split"] = split_labels(len(dataset), split_indices)
+    return metadata
+
+
+def export_metadata(
+    dataset: CosmosDataset,
+    output_path: str,
+    split_indices: Optional[Dict[str, np.ndarray]] = None,
+    csv_path: Optional[str] = None,
+) -> Dict[str, np.ndarray]:
+    metadata = build_metadata(dataset, split_indices=split_indices)
+    save_metadata_npz(output_path, metadata)
+    if csv_path is not None:
+        save_metadata_csv(csv_path, metadata)
+    return metadata
+
+
+def get_dataset_and_splits(
+    region: str = "all",
+    max_files: Optional[int] = None,
+    n_folds: Optional[int] = None,
+    fold_id: Optional[int] = None,
+) -> Tuple[CosmosDataset, Dict[str, np.ndarray]]:
+    dataset = CosmosDataset(CONFIG.DATA_PATH, morpho_path=CONFIG.MORPHO_PATH, region=region, max_files=max_files)
+    split_indices = compute_split_indices(dataset.data["ra"], n_folds=n_folds, fold_id=fold_id)
+    return dataset, split_indices
+
+
+def get_dataloaders(
+    batch_size: int = CONFIG.BATCH_SIZE,
+    num_workers: int = CONFIG.NUM_WORKERS,
+    region: str = "all",
+    max_files: Optional[int] = None,
+    n_folds: Optional[int] = None,
+    fold_id: Optional[int] = None,
+) -> Tuple[DataLoader, DataLoader, DataLoader]:
     '''
     actions : Construit les DataLoaders en appliquant un partitionnement spatial strict sur les données cross-matchées.
     inputs : Aucun
     appels : CosmosDataset, np.argsort, Subset, DataLoader
     outputs : Tuple contenant les DataLoaders de Train, Val et Test (Tuple[DataLoader, DataLoader, DataLoader])
     '''
-    full_ds = CosmosDataset(CONFIG.DATA_PATH, morpho_path=CONFIG.MORPHO_PATH)
-    ra_values = full_ds.data['ra']
-    sorted_indices = np.argsort(ra_values)
-
-    total = len(full_ds)
-    train_size = int(0.80 * total)
-    val_size = int(0.10 * total)
-
-    train_idx = sorted_indices[:train_size]
-    val_idx = sorted_indices[train_size : train_size + val_size]
-    test_idx = sorted_indices[train_size + val_size :]
+    full_ds, split_indices = get_dataset_and_splits(region=region, max_files=max_files, n_folds=n_folds, fold_id=fold_id)
+    train_idx = split_indices["train"]
+    val_idx = split_indices["val"]
+    test_idx = split_indices["test"]
 
     logger.info(f"Split Spatial RA : Train={len(train_idx)}, Val={len(val_idx)}, Test={len(test_idx)}")
 
