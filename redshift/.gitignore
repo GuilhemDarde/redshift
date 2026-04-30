@@ -19,13 +19,11 @@ catalogs/
 *.ckpt
 experiments/
 logs/
+*.log
 *.png
 *.jpg
 *.jpeg
 *.pdf
-cfm_v1/
-models_weights/
-(outdated)/
 
 # Environnement & Config locale
 .env
@@ -35,6 +33,5 @@ venv/
 .vscode/
 .idea/
 
-# OS / sauvegardes locales
+# OS
 .DS_Store
-.git-nested-*-backup/
