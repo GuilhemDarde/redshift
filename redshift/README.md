@@ -44,12 +44,15 @@ export COSMOS_DATA_PATH=/chemin/vers/les/fichiers_npz_cosmos
 export COSMOS_MORPHO_PATH=/chemin/vers/catalogue_morpho_cosmos.fits
 export COSMOS_EXP_FOLDER=/chemin/vers/le/dossier_experiences
 export COSMOS_METADATA_PATH=/chemin/optionnel/vers/dataset_metadata.npz
+export COSMOS_PROCESSED_DATASET_PATH=/chemin/optionnel/vers/processed_cosmos_all.npz
 export COSMOS_SEED=42
 export COSMOS_NUM_WORKERS=2
 export COSMOS_SYNTH_NUM_WORKERS=4
 ```
 
 Les chemins, seeds, batch sizes, workers et noms d'artefacts canoniques sont centralises dans `config.py`. Les scripts peuvent encore surcharger certains parametres en CLI, mais leurs valeurs par defaut viennent de `CONFIG`.
+
+Pour eviter de refaire le cross-match FITS/NPZ a chaque experience, definir `COSMOS_PROCESSED_DATASET_PATH` vers un fichier `.npz` sur un disque avec assez d'espace. Au premier chargement complet, le dataset pretraite est sauvegarde; les scripts suivants le rechargent directement. Ne pas utiliser ce cache avec `--max_files`, et utiliser un cache distinct par region (`all`, `stripe82`) si besoin.
 
 ## Structure
 

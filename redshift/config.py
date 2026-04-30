@@ -15,6 +15,7 @@ class Config:
     EXP_FOLDER: str = os.getenv("COSMOS_EXP_FOLDER", os.path.join(PROJECT_ROOT, "experiments"))
     MORPHO_PATH: str = os.getenv("COSMOS_MORPHO_PATH", os.path.join(PROJECT_ROOT, "catalogs", "catalogue_morpho_cosmos.fits"))
     METADATA_PATH: str = os.getenv("COSMOS_METADATA_PATH", "")
+    PROCESSED_DATASET_PATH: str = os.getenv("COSMOS_PROCESSED_DATASET_PATH", "")
 
     # Paramètres Données
     I_MIN: float = 18.0

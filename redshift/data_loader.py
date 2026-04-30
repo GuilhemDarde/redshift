@@ -29,14 +29,55 @@ class CosmosDataset(Dataset):
         morpho_path: str = CONFIG.MORPHO_PATH,
         region: str = "all",
         max_files: Optional[int] = None,
+        cache_path: Optional[str] = None,
     ) -> None:
         self.files = sorted(glob.glob(os.path.join(data_dir, "*.npz")))
         if max_files is not None:
             self.files = self.files[:max_files]
+        self.data_dir = data_dir
         self.morpho_path = morpho_path
         self.region = region
+        self.cache_path = cache_path if cache_path is not None else CONFIG.PROCESSED_DATASET_PATH
+
+        if self.cache_path and max_files is None and os.path.exists(self.cache_path):
+            self.data = self._load_processed_cache(self.cache_path)
+            return
+
         self.morpho_data = self._load_morpho_catalog()
         self.data = self._load_and_process()
+        if self.cache_path and max_files is None:
+            self._save_processed_cache(self.cache_path)
+
+    def _load_processed_cache(self, cache_path: str) -> Dict[str, np.ndarray]:
+        logger.info("Chargement du dataset pretraite depuis le cache : %s", cache_path)
+        with np.load(cache_path, allow_pickle=False) as cached:
+            data = {key: cached[key] for key in cached.files if not key.startswith("__")}
+
+            cache_region = str(cached["__region"].item()) if "__region" in cached.files else "unknown"
+            if cache_region != self.region:
+                raise ValueError(
+                    f"Cache dataset construit pour region={cache_region}, mais region={self.region}. "
+                    "Utilisez un autre COSMOS_PROCESSED_DATASET_PATH ou supprimez le cache."
+                )
+
+        required = {"x", "cond", "ra", "dec", "z_true", "mag_i", "mags", "flags", "re_norm", "n_norm"}
+        missing = sorted(required - set(data))
+        if missing:
+            raise KeyError(f"Cache dataset incomplet {cache_path}. Cles manquantes: {missing}")
+        logger.info("Dataset charge depuis cache : %s objets. Conditionnement Dim=%s.", len(data["cond"]), data["cond"].shape[1])
+        return data
+
+    def _save_processed_cache(self, cache_path: str) -> None:
+        os.makedirs(os.path.dirname(cache_path) or ".", exist_ok=True)
+        logger.info("Sauvegarde du dataset pretraite dans le cache : %s", cache_path)
+        np.savez(
+            cache_path,
+            **self.data,
+            __region=np.array(self.region),
+            __data_dir=np.array(self.data_dir),
+            __morpho_path=np.array(self.morpho_path),
+            __n_files=np.array(len(self.files)),
+        )
 
     def _load_morpho_catalog(self) -> Dict[str, np.ndarray]:
         '''
@@ -297,8 +338,9 @@ def get_dataset_and_splits(
     max_files: Optional[int] = None,
     n_folds: Optional[int] = None,
     fold_id: Optional[int] = None,
+    cache_path: Optional[str] = None,
 ) -> Tuple[CosmosDataset, Dict[str, np.ndarray]]:
-    dataset = CosmosDataset(CONFIG.DATA_PATH, morpho_path=CONFIG.MORPHO_PATH, region=region, max_files=max_files)
+    dataset = CosmosDataset(CONFIG.DATA_PATH, morpho_path=CONFIG.MORPHO_PATH, region=region, max_files=max_files, cache_path=cache_path)
     split_indices = compute_split_indices(dataset.data["ra"], n_folds=n_folds, fold_id=fold_id)
     return dataset, split_indices
 
@@ -310,6 +352,7 @@ def get_dataloaders(
     max_files: Optional[int] = None,
     n_folds: Optional[int] = None,
     fold_id: Optional[int] = None,
+    cache_path: Optional[str] = None,
 ) -> Tuple[DataLoader, DataLoader, DataLoader]:
     '''
     actions : Construit les DataLoaders en appliquant un partitionnement spatial strict sur les données cross-matchées.
@@ -317,7 +360,7 @@ def get_dataloaders(
     appels : CosmosDataset, np.argsort, Subset, DataLoader
     outputs : Tuple contenant les DataLoaders de Train, Val et Test (Tuple[DataLoader, DataLoader, DataLoader])
     '''
-    full_ds, split_indices = get_dataset_and_splits(region=region, max_files=max_files, n_folds=n_folds, fold_id=fold_id)
+    full_ds, split_indices = get_dataset_and_splits(region=region, max_files=max_files, n_folds=n_folds, fold_id=fold_id, cache_path=cache_path)
     train_idx = split_indices["train"]
     val_idx = split_indices["val"]
     test_idx = split_indices["test"]
