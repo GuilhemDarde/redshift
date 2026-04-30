@@ -38,3 +38,4 @@ venv/
 # OS / sauvegardes locales
 .DS_Store
 .git-nested-*-backup/
+redshift.bundle
