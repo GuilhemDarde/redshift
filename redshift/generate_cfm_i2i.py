@@ -5,6 +5,7 @@ from typing import List, Tuple
 
 import numpy as np
 import torch
+import torch.nn as nn
 from tqdm import tqdm
 
 from config import CONFIG
@@ -22,6 +23,53 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 
+class CFMGenerationWrapper(nn.Module):
+    '''
+    actions : Expose les méthodes génératives du CFM via forward pour permettre torch.nn.DataParallel.
+    inputs : base_cfm (ConditionalFlowMatching)
+    appels : ConditionalFlowMatching.generate, augment_image_to_image, partial_invert, reconstruct_from_latent
+    outputs : Instance de CFMGenerationWrapper
+    '''
+    def __init__(self, base_cfm: ConditionalFlowMatching) -> None:
+        super().__init__()
+        self.base_cfm = base_cfm
+
+    def forward(
+        self,
+        cond_vector: torch.Tensor,
+        x_real: torch.Tensor = None,
+        partner_x: torch.Tensor = None,
+        partner_cond: torch.Tensor = None,
+        mode: str = "global",
+        t0: float = 0.55,
+        noise_scale: float = 0.08,
+        alpha: float = 0.25,
+        num_steps: int = 50,
+    ) -> torch.Tensor:
+        if mode in {"global", "targeted_global"}:
+            return self.base_cfm.generate(cond_vector, num_steps=num_steps)
+        if mode == "i2i":
+            if x_real is None:
+                raise ValueError("x_real est requis pour le mode i2i.")
+            return self.base_cfm.augment_image_to_image(
+                x_real,
+                cond_vector,
+                t0=t0,
+                noise_scale=noise_scale,
+                num_steps=num_steps,
+            )
+        if mode == "interp":
+            if x_real is None or partner_x is None or partner_cond is None:
+                raise ValueError("x_real, partner_x et partner_cond sont requis pour le mode interp.")
+            latent_source = self.base_cfm.partial_invert(x_real, cond_vector, t0=t0, num_steps=num_steps)
+            latent_partner = self.base_cfm.partial_invert(partner_x, partner_cond, t0=t0, num_steps=num_steps)
+            latent = (1.0 - alpha) * latent_source + alpha * latent_partner
+            if noise_scale > 0.0:
+                latent = latent + noise_scale * torch.randn_like(latent)
+            return self.base_cfm.reconstruct_from_latent(latent, cond_vector, t0=t0, num_steps=num_steps)
+        raise ValueError(f"Mode de génération inconnu: {mode}")
+
+
 def load_cfm(checkpoint: str, device: torch.device) -> ConditionalFlowMatching:
     model = ConditionalFlowMatching(num_timesteps=CONFIG.TIMESTEPS).to(device)
     if not os.path.exists(checkpoint):
@@ -29,6 +77,16 @@ def load_cfm(checkpoint: str, device: torch.device) -> ConditionalFlowMatching:
     model.load_state_dict(torch.load(checkpoint, map_location=device))
     model.eval()
     return model
+
+
+def build_generator(model: ConditionalFlowMatching, enabled: bool) -> nn.Module:
+    generator = CFMGenerationWrapper(model)
+    if enabled and torch.cuda.is_available() and torch.cuda.device_count() > 1:
+        logger.info("Activation DataParallel génération sur %s GPU visibles.", torch.cuda.device_count())
+        return nn.DataParallel(generator)
+    if enabled:
+        logger.info("DataParallel génération demandé mais un seul GPU est visible.")
+    return generator
 
 
 def sample_indices(indices: np.ndarray, limit: int, seed: int) -> np.ndarray:
@@ -114,7 +172,7 @@ def append_batch(
 
 @torch.no_grad()
 def generate_for_indices(
-    model: ConditionalFlowMatching,
+    generator: nn.Module,
     dataset_x: np.ndarray,
     dataset_cond: np.ndarray,
     density: np.ndarray,
@@ -142,7 +200,11 @@ def generate_for_indices(
         batch_density = density[batch_sources]
 
         if args.mode in {"global", "targeted_global"}:
-            x_gen = model.generate(batch_cond, num_steps=args.steps)
+            x_gen = generator(
+                batch_cond,
+                mode=args.mode,
+                num_steps=args.steps,
+            )
             append_batch(
                 images, conds, sources, partners, densities, modes, strengths,
                 x_gen, batch_cond_np, batch_sources, np.full(len(batch_sources), -1, dtype=np.int64),
@@ -152,9 +214,10 @@ def generate_for_indices(
 
         batch_x = torch.tensor(dataset_x[batch_sources], dtype=torch.float32, device=device)
         if args.mode in {"i2i", "both"}:
-            x_gen = model.augment_image_to_image(
-                batch_x,
+            x_gen = generator(
                 batch_cond,
+                x_real=batch_x,
+                mode="i2i",
                 t0=args.t0,
                 noise_scale=args.noise_scale,
                 num_steps=args.steps,
@@ -177,12 +240,17 @@ def generate_for_indices(
             partner_cond_np = dataset_cond[interp_partners].astype(np.float32)
             source_cond = torch.tensor(source_cond_np, dtype=torch.float32, device=device)
             partner_cond = torch.tensor(partner_cond_np, dtype=torch.float32, device=device)
-            latent_source = model.partial_invert(source_x, source_cond, t0=args.t0, num_steps=args.steps)
-            latent_partner = model.partial_invert(partner_x, partner_cond, t0=args.t0, num_steps=args.steps)
-            latent = (1.0 - args.alpha) * latent_source + args.alpha * latent_partner
-            if args.noise_scale > 0.0:
-                latent = latent + args.noise_scale * torch.randn_like(latent)
-            x_gen = model.reconstruct_from_latent(latent, source_cond, t0=args.t0, num_steps=args.steps)
+            x_gen = generator(
+                source_cond,
+                x_real=source_x,
+                partner_x=partner_x,
+                partner_cond=partner_cond,
+                mode="interp",
+                t0=args.t0,
+                noise_scale=args.noise_scale,
+                alpha=args.alpha,
+                num_steps=args.steps,
+            )
             append_batch(
                 images, conds, sources, partners, densities, modes, strengths,
                 x_gen, source_cond_np, interp_sources, interp_partners, density[interp_sources],
@@ -238,8 +306,10 @@ def run(args: argparse.Namespace) -> None:
         density_threshold,
     )
     model = load_cfm(args.checkpoint or CONFIG.exp_path(CONFIG.CFM_CHECKPOINT), device)
+    generator = build_generator(model, args.data_parallel)
+    generator.eval()
     x, cond, source_idx, partner_idx, source_density, mode, strength = generate_for_indices(
-        model,
+        generator,
         dataset.data["x"],
         dataset.data["cond"],
         density,
@@ -286,4 +356,5 @@ if __name__ == "__main__":
     parser.add_argument("--noise_scale", type=float, default=0.08)
     parser.add_argument("--alpha", type=float, default=0.25)
     parser.add_argument("--seed", type=int, default=CONFIG.SEED)
+    parser.add_argument("--data_parallel", action="store_true")
     run(parser.parse_args())

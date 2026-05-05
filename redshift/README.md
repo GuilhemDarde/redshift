@@ -107,7 +107,7 @@ Utiliser ce protocole pour produire un resultat comparable et archivable.
    - Commande canonique:
 
 ```bash
-python redshift/train.py --epochs 100 --batch_size 64 --lr 1e-4 --lambda_photo 0.01 --seed "$COSMOS_SEED"
+python redshift/train.py --epochs 100 --batch_size 64 --lr 1e-4 --lambda_photo 0.01 --seed "$COSMOS_SEED" --data_parallel
 ```
 
    - Checkpoint attendu: `cfm_model_physics.pt` dans `COSMOS_EXP_FOLDER`.
@@ -165,7 +165,7 @@ python redshift/analyze_dataset.py --region stripe82 --max_files 2
 Entrainer le generateur CFM:
 
 ```bash
-python redshift/train.py --epochs 100 --batch_size 64 --lr 1e-4 --lambda_photo 0.01 --seed "$COSMOS_SEED"
+python redshift/train.py --epochs 100 --batch_size 64 --lr 1e-4 --lambda_photo 0.01 --seed "$COSMOS_SEED" --data_parallel
 ```
 
 Generer un dataset synthetique:
@@ -219,7 +219,8 @@ python redshift/generate_cfm_i2i.py \
   --n_aug_per_source 2 \
   --t0 0.55 \
   --noise_scale 0.08 \
-  --alpha 0.25
+  --alpha 0.25 \
+  --data_parallel
 
 # 2. Filtrer et documenter la coherence photometrique.
 python redshift/photometric_validation.py \
@@ -233,7 +234,8 @@ python redshift/experiment_marie_augmented.py \
   --synthetic_i2i "$COSMOS_EXP_FOLDER/cfm_aug_accepted_both.npz" \
   --synthetic_interp "$COSMOS_EXP_FOLDER/cfm_aug_accepted_both.npz" \
   --filter_synthetic_mode \
-  --output_dir "$COSMOS_EXP_FOLDER/marie_augmented"
+  --output_dir "$COSMOS_EXP_FOLDER/marie_augmented" \
+  --data_parallel
 ```
 
 Smoke test rapide du pipeline:

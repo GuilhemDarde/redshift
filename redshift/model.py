@@ -326,9 +326,9 @@ class OT_CFM_Physics_Wrapper(nn.Module):
         loss_total = loss_vf + self.lambda_photo * loss_photo
         
         metrics = {
-            "loss_total": loss_total.item(),
-            "loss_vf": loss_vf.item(),
-            "loss_photo": loss_photo.item()
+            "loss_total": loss_total.detach(),
+            "loss_vf": loss_vf.detach(),
+            "loss_photo": loss_photo.detach()
         }
         
         return loss_total, metrics

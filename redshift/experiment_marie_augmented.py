@@ -20,6 +20,19 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 
+def maybe_data_parallel(model: torch.nn.Module, enabled: bool) -> torch.nn.Module:
+    if enabled and torch.cuda.is_available() and torch.cuda.device_count() > 1:
+        logger.info("Activation DataParallel Marie sur %s GPU visibles.", torch.cuda.device_count())
+        return torch.nn.DataParallel(model)
+    if enabled:
+        logger.info("DataParallel Marie demandé mais un seul GPU est visible.")
+    return model
+
+
+def unwrap_model(model: torch.nn.Module) -> torch.nn.Module:
+    return model.module if isinstance(model, torch.nn.DataParallel) else model
+
+
 class ClassicAugmentDataset(Dataset):
     '''
     actions : Produit des augmentations classiques label-preserving pour comparer la valeur ajoutée du CFM.
@@ -202,12 +215,13 @@ def run_single_ablation(
 
     edges = np.array(CONFIG.Z_BIN_EDGES, dtype=np.float64)
     model = MarieStyleBaseline(n_bins=len(edges) - 1).to(device)
+    model = maybe_data_parallel(model, args.data_parallel)
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
     for epoch in range(args.epochs):
         loss = train_epoch(model, train_loader, optimizer, device, edges, args.limit_batches)
         logger.info("[%s] Epoch %s/%s | Loss %.5f", ablation, epoch + 1, args.epochs, loss)
 
-    torch.save(model.state_dict(), os.path.join(output_dir, f"marie_augmented_{ablation}.pt"))
+    torch.save(unwrap_model(model).state_dict(), os.path.join(output_dir, f"marie_augmented_{ablation}.pt"))
     z_true, z_pred = predict(model, test_loader, device, args.limit_batches)
     test_density = density[test_indices][: len(z_true)]
 
@@ -332,4 +346,5 @@ if __name__ == "__main__":
     parser.add_argument("--limit_batches", type=int, default=None)
     parser.add_argument("--output_dir", type=str, default=None)
     parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--data_parallel", action="store_true")
     run(parser.parse_args())

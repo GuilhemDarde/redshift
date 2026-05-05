@@ -40,6 +40,23 @@ def get_scaler():
         return torch.amp.GradScaler(device='cuda')
     return torch.cuda.amp.GradScaler()
 
+
+def maybe_data_parallel(model: torch.nn.Module, enabled: bool) -> torch.nn.Module:
+    if enabled and torch.cuda.is_available() and torch.cuda.device_count() > 1:
+        logger.info("Activation DataParallel sur %s GPU visibles.", torch.cuda.device_count())
+        return torch.nn.DataParallel(model)
+    if enabled:
+        logger.info("DataParallel demandé mais un seul GPU est visible.")
+    return model
+
+
+def unwrap_model(model: torch.nn.Module) -> torch.nn.Module:
+    return model.module if isinstance(model, torch.nn.DataParallel) else model
+
+
+def scalar_loss(loss: torch.Tensor) -> torch.Tensor:
+    return loss.mean() if loss.ndim > 0 else loss
+
 '''
 actions : Exécute une passe d'apprentissage complète sur le jeu de données d'entraînement.
 inputs : model (torch.nn.Module), loader (torch.utils.data.DataLoader), optimizer (torch.optim.Optimizer), scaler (any), device (torch.device)
@@ -56,6 +73,7 @@ def train_epoch(model: torch.nn.Module, loader: torch.utils.data.DataLoader, opt
         optimizer.zero_grad(set_to_none=True)
         with get_autocast(device.type):
             loss, _ = model(x, cond)
+            loss = scalar_loss(loss)
             
         scaler.scale(loss).backward()
         scaler.step(optimizer)
@@ -80,6 +98,7 @@ def validate_epoch(model: torch.nn.Module, loader: torch.utils.data.DataLoader, 
             
             with get_autocast(device.type):
                 loss, _ = model(x, cond)
+                loss = scalar_loss(loss)
             total_loss += loss.item()
             
     return total_loss / len(loader)
@@ -97,6 +116,7 @@ def train(args: argparse.Namespace) -> None:
     
     base_cfm = ConditionalFlowMatching(num_timesteps=CONFIG.TIMESTEPS)
     model = OT_CFM_Physics_Wrapper(base_cfm, lambda_photo=args.lambda_photo).to(device)
+    model = maybe_data_parallel(model, args.data_parallel)
     
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
     scaler = get_scaler()
@@ -111,7 +131,7 @@ def train(args: argparse.Namespace) -> None:
         
         if v_loss < best_loss:
             best_loss = v_loss
-            torch.save(model.base_cfm.state_dict(), save_path)
+            torch.save(unwrap_model(model).base_cfm.state_dict(), save_path)
             
     logger.info(f"Meilleur modèle OT-CFM sauvegardé : {save_path}")
 
@@ -123,4 +143,5 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=CONFIG.SEED)
     parser.add_argument("--lr", type=float, default=CONFIG.LR)
     parser.add_argument("--lambda_photo", type=float, default=0.01)
+    parser.add_argument("--data_parallel", action="store_true")
     train(parser.parse_args())
