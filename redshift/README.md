@@ -63,6 +63,9 @@ Pour eviter de refaire le cross-match FITS/NPZ a chaque experience, definir `COS
 - `backbone.py`: G-CNN equivariant et tete MDN pour l'estimation probabiliste du redshift.
 - `train.py`: entrainement du generateur CFM.
 - `generate_mass.py`: generation de jeux synthetiques depuis le CFM entraine.
+- `generate_cfm_i2i.py`: augmentation DA-Fusion-like par inversion partielle CFM, ciblage faible densite et interpolation latente.
+- `photometric_validation.py`: filtrage et preuves photometriques des augmentations generees.
+- `experiment_marie_augmented.py`: ablations Marie baseline reel seul vs augmentations classiques/CFM.
 - `experiment_backbone.py`: pre-entrainement synthetique, fine-tuning reel et rapport statistique.
 - `experiment_sota.py`: ensemble G-CNN/MDN avec evaluation NMAD/outliers.
 - `experiment_uncertainty.py`: analyse PIT de la calibration.
@@ -203,6 +206,42 @@ Lancer les smoke tests sans donnees lourdes:
 
 ```bash
 python -m unittest discover -s redshift/tests -v
+```
+
+Pipeline augmentation DA-Fusion-like pour Marie baseline:
+
+```bash
+# 1. Generer des candidats depuis vraies galaxies faible densite.
+python redshift/generate_cfm_i2i.py \
+  --mode both \
+  --checkpoint "$COSMOS_EXP_FOLDER/cfm_model_physics.pt" \
+  --output "$COSMOS_EXP_FOLDER/cfm_aug_candidates_both.npz" \
+  --n_aug_per_source 2 \
+  --t0 0.55 \
+  --noise_scale 0.08 \
+  --alpha 0.25
+
+# 2. Filtrer et documenter la coherence photometrique.
+python redshift/photometric_validation.py \
+  --candidates "$COSMOS_EXP_FOLDER/cfm_aug_candidates_both.npz" \
+  --output_filtered "$COSMOS_EXP_FOLDER/cfm_aug_accepted_both.npz" \
+  --output_dir "$COSMOS_EXP_FOLDER/photometry_validation"
+
+# 3. Entrainer/evaluer uniquement la baseline Marie avec ablations.
+python redshift/experiment_marie_augmented.py \
+  --ablations real classic i2i interp \
+  --synthetic_i2i "$COSMOS_EXP_FOLDER/cfm_aug_accepted_both.npz" \
+  --synthetic_interp "$COSMOS_EXP_FOLDER/cfm_aug_accepted_both.npz" \
+  --filter_synthetic_mode \
+  --output_dir "$COSMOS_EXP_FOLDER/marie_augmented"
+```
+
+Smoke test rapide du pipeline:
+
+```bash
+python redshift/generate_cfm_i2i.py --mode both --limit_sources 4 --n_aug_per_source 1 --batch_size 2 --steps 2
+python redshift/photometric_validation.py --candidates "$COSMOS_EXP_FOLDER/cfm_aug_candidates_both.npz" --max_reference 64
+python redshift/experiment_marie_augmented.py --ablations real classic --epochs 1 --limit_batches 2
 ```
 
 ## Reproductibilite

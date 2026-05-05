@@ -178,31 +178,94 @@ class ConditionalFlowMatching(nn.Module):
         return loss_vf
 
     @torch.no_grad()
+    def integrate_flow(
+        self,
+        x_start: torch.Tensor,
+        cond_vector: torch.Tensor,
+        t_start: float,
+        t_end: float,
+        num_steps: int = 50,
+    ) -> torch.Tensor:
+        '''
+        actions : Intègre l'ODE du CFM entre deux temps continus, vers l'avant ou vers l'arrière.
+        inputs : x_start (torch.Tensor), cond_vector (torch.Tensor), t_start (float), t_end (float), num_steps (int)
+        appels : self.condition_encoder, get_timestep_embedding, self.denoiser
+        outputs : torch.Tensor
+        '''
+        if num_steps <= 0:
+            raise ValueError("num_steps doit etre strictement positif.")
+
+        B = cond_vector.shape[0]
+        device = cond_vector.device
+        x_t = x_start.to(device).clone()
+        cond_emb = self.condition_encoder(cond_vector)
+        dt = (t_end - t_start) / float(num_steps)
+
+        for i in range(num_steps):
+            t_val = t_start + i * dt
+            t_tensor = torch.full((B,), t_val, device=device)
+            t_emb = get_timestep_embedding(t_tensor * 1000.0, 128)
+            v_pred = self.denoiser(x_t, t_emb, cond_emb)
+            x_t = x_t + v_pred * dt
+
+        return x_t
+
+    @torch.no_grad()
+    def partial_invert(self, x_real: torch.Tensor, cond_vector: torch.Tensor, t0: float = 0.55, num_steps: int = 50) -> torch.Tensor:
+        '''
+        actions : Projette une image réelle vers un état latent partiellement bruité par intégration inverse.
+        inputs : x_real (torch.Tensor), cond_vector (torch.Tensor), t0 (float), num_steps (int)
+        appels : self.integrate_flow
+        outputs : torch.Tensor
+        '''
+        if not 0.0 <= t0 <= 1.0:
+            raise ValueError("t0 doit etre dans [0, 1].")
+        return self.integrate_flow(x_real, cond_vector, t_start=1.0, t_end=t0, num_steps=num_steps)
+
+    @torch.no_grad()
+    def reconstruct_from_latent(self, latent: torch.Tensor, cond_vector: torch.Tensor, t0: float = 0.55, num_steps: int = 50) -> torch.Tensor:
+        '''
+        actions : Reconstruit une image depuis un latent partiel avec les contraintes physiques fournies.
+        inputs : latent (torch.Tensor), cond_vector (torch.Tensor), t0 (float), num_steps (int)
+        appels : self.integrate_flow
+        outputs : torch.Tensor
+        '''
+        if not 0.0 <= t0 <= 1.0:
+            raise ValueError("t0 doit etre dans [0, 1].")
+        return self.integrate_flow(latent, cond_vector, t_start=t0, t_end=1.0, num_steps=num_steps)
+
+    @torch.no_grad()
+    def augment_image_to_image(
+        self,
+        x_real: torch.Tensor,
+        cond_vector: torch.Tensor,
+        t0: float = 0.55,
+        noise_scale: float = 0.08,
+        num_steps: int = 50,
+    ) -> torch.Tensor:
+        '''
+        actions : Génère une variante locale de type DA-Fusion via inversion partielle, perturbation et reconstruction CFM.
+        inputs : x_real (torch.Tensor), cond_vector (torch.Tensor), t0 (float), noise_scale (float), num_steps (int)
+        appels : self.partial_invert, torch.randn_like, self.reconstruct_from_latent
+        outputs : torch.Tensor
+        '''
+        latent = self.partial_invert(x_real, cond_vector, t0=t0, num_steps=num_steps)
+        if noise_scale > 0.0:
+            latent = latent + noise_scale * torch.randn_like(latent)
+        return self.reconstruct_from_latent(latent, cond_vector, t0=t0, num_steps=num_steps)
+
+    @torch.no_grad()
     def generate(self, cond_vector: torch.Tensor, num_steps: int = 50) -> torch.Tensor:
         '''
         actions : Résout l'équation différentielle ordinaire d'Euler pour synthétiser des images à partir de bruit conditionné.
         inputs : cond_vector (torch.Tensor), num_steps (int)
-        appels : self.condition_encoder, torch.randn, get_timestep_embedding, self.denoiser
+        appels : torch.randn, self.integrate_flow
         outputs : torch.Tensor
         '''
         B = cond_vector.shape[0]
         device = cond_vector.device
-        
-        cond_emb = self.condition_encoder(cond_vector)
-        x_t = torch.randn(B, 6, 64, 64, device=device)
-        
-        dt = 1.0 / num_steps
-        
-        for i in range(num_steps):
-            t_val = i / num_steps
-            t_tensor = torch.full((B,), t_val, device=device)
-            
-            t_emb = get_timestep_embedding(t_tensor * 1000.0, 128)
-            v_pred = self.denoiser(x_t, t_emb, cond_emb)
-            
-            x_t = x_t + v_pred * dt
-            
-        return x_t
+        x_0 = torch.randn(B, 6, 64, 64, device=device)
+        return self.integrate_flow(x_0, cond_vector, t_start=0.0, t_end=1.0, num_steps=num_steps)
 
 
 class PhysicsInformedLoss(nn.Module):

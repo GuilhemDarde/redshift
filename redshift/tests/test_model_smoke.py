@@ -82,6 +82,15 @@ class ModelSmokeTests(unittest.TestCase):
         self.assertEqual(generated.shape, (1, 6, 64, 64))
         self.assertTrue(torch.isfinite(generated).all())
 
+    def test_image_to_image_augmentation_smoke_shape(self):
+        model = ConditionalFlowMatching()
+        x, cond = make_batch(batch_size=1)
+
+        augmented = model.augment_image_to_image(x, cond, t0=0.5, noise_scale=0.01, num_steps=1)
+
+        self.assertEqual(augmented.shape, x.shape)
+        self.assertTrue(torch.isfinite(augmented).all())
+
 
 if __name__ == "__main__":
     unittest.main()
