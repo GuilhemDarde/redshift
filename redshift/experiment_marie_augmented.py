@@ -147,6 +147,7 @@ def synthetic_path_for_ablation(args: argparse.Namespace, ablation: str) -> Opti
         "targeted_global": args.synthetic_targeted_global,
         "i2i": args.synthetic_i2i,
         "interp": args.synthetic_interp,
+        "classic_i2i": args.synthetic_i2i,
     }.get(ablation)
 
 
@@ -156,6 +157,15 @@ def build_training_dataset(train_real: Dataset, ablation: str, args: argparse.Na
     if ablation == "classic":
         classic = ClassicAugmentDataset(train_real, copies=args.classic_copies, noise_std=args.classic_noise_std)
         return ConcatDataset([train_real, classic])
+    if ablation == "classic_i2i":
+        classic = ClassicAugmentDataset(train_real, copies=args.classic_copies, noise_std=args.classic_noise_std)
+        synthetic = load_synthetic_dataset(
+            synthetic_path_for_ablation(args, ablation),
+            max_samples=args.max_synthetic,
+            seed=args.seed,
+            mode_filter="i2i" if args.filter_synthetic_mode else None,
+        )
+        return ConcatDataset([train_real, classic, synthetic])
 
     path = synthetic_path_for_ablation(args, ablation)
     synthetic = load_synthetic_dataset(
@@ -249,8 +259,8 @@ def run_single_ablation(
 def resolve_ablations(args: argparse.Namespace) -> List[str]:
     requested = args.ablations
     if "all" in requested:
-        requested = ["real", "classic", "global", "targeted_global", "i2i", "interp"]
-    valid = {"real", "classic", "global", "targeted_global", "i2i", "interp"}
+        requested = ["real", "classic", "global", "targeted_global", "i2i", "interp", "classic_i2i"]
+    valid = {"real", "classic", "global", "targeted_global", "i2i", "interp", "classic_i2i"}
     unknown = sorted(set(requested) - valid)
     if unknown:
         raise ValueError(f"Ablations inconnues: {unknown}")

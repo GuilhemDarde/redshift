@@ -8,7 +8,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 import numpy as np
 
 from config import CONFIG
-from experiment_marie_augmented import load_synthetic_dataset
+from argparse import Namespace
+
+import torch
+from torch.utils.data import TensorDataset
+
+from experiment_marie_augmented import build_training_dataset, load_synthetic_dataset, resolve_ablations
 from photometric_validation import (
     acceptance_mask,
     calibrate_zero_points,
@@ -76,6 +81,36 @@ class PhotometricValidationTests(unittest.TestCase):
         self.assertEqual(len(ds), 2)
         self.assertEqual(ds[0][0].shape, (6, 4, 4))
         self.assertEqual(ds[0][1].shape, (7,))
+
+    def test_classic_i2i_ablation_combines_real_classic_and_synthetic(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "synthetic.npz")
+            np.savez(
+                path,
+                x=np.zeros((2, 6, 4, 4), dtype=np.float32),
+                cond=np.zeros((2, 7), dtype=np.float32),
+                mode=np.array(["i2i", "i2i"]),
+            )
+            real = TensorDataset(torch.zeros(3, 6, 4, 4), torch.zeros(3, 7))
+            args = Namespace(
+                synthetic_i2i=path,
+                synthetic_global=None,
+                synthetic_targeted_global=None,
+                synthetic_interp=None,
+                max_synthetic=None,
+                seed=42,
+                filter_synthetic_mode=True,
+                classic_copies=1,
+                classic_noise_std=0.0,
+            )
+
+            ds = build_training_dataset(real, "classic_i2i", args)
+
+        self.assertEqual(len(ds), 8)
+
+    def test_resolve_ablations_accepts_classic_i2i(self):
+        args = Namespace(ablations=["classic_i2i"])
+        self.assertEqual(resolve_ablations(args), ["classic_i2i"])
 
 
 if __name__ == "__main__":

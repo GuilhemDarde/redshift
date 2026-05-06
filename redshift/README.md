@@ -230,7 +230,7 @@ python redshift/photometric_validation.py \
 
 # 3. Entrainer/evaluer uniquement la baseline Marie avec ablations.
 python redshift/experiment_marie_augmented.py \
-  --ablations real classic i2i interp \
+  --ablations real classic i2i interp classic_i2i \
   --synthetic_i2i "$COSMOS_EXP_FOLDER/cfm_aug_accepted_both.npz" \
   --synthetic_interp "$COSMOS_EXP_FOLDER/cfm_aug_accepted_both.npz" \
   --filter_synthetic_mode \
