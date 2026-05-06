@@ -6,7 +6,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 import numpy as np
 
-from density_utils import compute_train_knn_density, low_density_mask, projected_radec_coordinates
+from density_utils import compute_catalog_knn_density, compute_train_knn_density, low_density_mask, projected_radec_coordinates
 
 
 class DensityUtilsTests(unittest.TestCase):
@@ -30,6 +30,17 @@ class DensityUtilsTests(unittest.TestCase):
         self.assertTrue(np.isfinite(threshold))
         self.assertTrue(mask[-1])
         self.assertFalse(mask[1])
+
+    def test_catalog_density_leave_one_out(self):
+        ra = np.array([0.0, 0.01, 0.02, 10.0])
+        dec = np.zeros_like(ra)
+
+        density, radius = compute_catalog_knn_density(ra, dec, k=1)
+
+        self.assertEqual(density.shape, ra.shape)
+        self.assertEqual(radius.shape, ra.shape)
+        self.assertTrue(np.isfinite(density).all())
+        self.assertGreater(density[1], density[-1])
 
 
 if __name__ == "__main__":

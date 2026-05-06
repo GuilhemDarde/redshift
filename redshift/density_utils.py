@@ -91,6 +91,42 @@ def compute_train_knn_density(
     return density, kth_radius
 
 
+def compute_catalog_knn_density(
+    ra: np.ndarray,
+    dec: np.ndarray,
+    k: int = 10,
+) -> Tuple[np.ndarray, np.ndarray]:
+    '''
+    actions : Calcule une densité locale leave-one-out dans le catalogue complet.
+    inputs : ra (np.ndarray), dec (np.ndarray), k (int)
+    appels : projected_radec_coordinates, _query_knn_distances
+    outputs : Tuple[np.ndarray, np.ndarray]
+    '''
+    n = len(ra)
+    if n < 2:
+        return np.zeros(n, dtype=np.float64), np.full(n, np.nan, dtype=np.float64)
+
+    coords = projected_radec_coordinates(ra, dec)
+    k_eff = int(max(1, min(k, n - 1)))
+    dist, idx = _query_knn_distances(coords, coords, k=min(k_eff + 1, n))
+    if dist.ndim == 1:
+        dist = dist[:, None]
+        idx = idx[:, None]
+
+    kth_radius = np.empty(n, dtype=np.float64)
+    for row in range(n):
+        row_dist = dist[row][idx[row] != row]
+        if row_dist.size == 0:
+            kth_radius[row] = np.nan
+        else:
+            kth_radius[row] = row_dist[min(k_eff - 1, row_dist.size - 1)]
+
+    safe_radius = np.clip(kth_radius, 1e-12, None)
+    density = k_eff / (np.pi * safe_radius * safe_radius)
+    density[~np.isfinite(kth_radius)] = 0.0
+    return density, kth_radius
+
+
 def low_density_mask(density: np.ndarray, reference_indices: np.ndarray, quantile: float = 0.20) -> Tuple[np.ndarray, float]:
     '''
     actions : Sélectionne les objets sous un quantile de densité mesuré sur une population de référence.

@@ -16,6 +16,12 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 PHOTO_KEYS = ("mag_i", "g_r", "r_i", "i_z")
+PHOTO_FEATURE_LIMITS = {
+    "mag_i": (CONFIG.I_MIN - 1.0, CONFIG.I_MAX + 1.5),
+    "g_r": (-3.0, 3.0),
+    "r_i": (-3.0, 3.0),
+    "i_z": (-3.0, 3.0),
+}
 
 
 def denormalize_images(x: np.ndarray, asinh_norm: bool = CONFIG.ASINH_NORM) -> np.ndarray:
@@ -123,6 +129,21 @@ def residuals_from_features(observed: Dict[str, np.ndarray], target: Dict[str, n
     return {key: np.asarray(observed[key]) - np.asarray(target[key]) for key in PHOTO_KEYS}
 
 
+def feature_limits_mask(features: Dict[str, np.ndarray], limits: Dict[str, Tuple[float, float]] = PHOTO_FEATURE_LIMITS) -> np.ndarray:
+    '''
+    actions : Rejette les cibles photométriques manifestement non physiques avant calibration et filtrage.
+    inputs : features (Dict[str, np.ndarray]), limits (Dict[str, Tuple[float, float]])
+    appels : np.asarray, np.isfinite
+    outputs : np.ndarray
+    '''
+    n = len(next(iter(features.values())))
+    mask = np.ones(n, dtype=bool)
+    for key, (lo, hi) in limits.items():
+        values = np.asarray(features[key])
+        mask &= np.isfinite(values) & (values >= lo) & (values <= hi)
+    return mask
+
+
 def residual_thresholds(real_residuals: Dict[str, np.ndarray], quantile: float = 0.95, min_threshold: float = 1e-3) -> Dict[str, float]:
     '''
     actions : Construit l'enveloppe empirique d'acceptation à partir des résidus des vraies galaxies.
@@ -153,6 +174,7 @@ def acceptance_mask(
     thresholds: Dict[str, float],
     fluxes: np.ndarray,
     images: np.ndarray,
+    target_features: Optional[Dict[str, np.ndarray]] = None,
     min_flux: float = 1e-8,
     max_negative_fraction: float = 0.45,
 ) -> np.ndarray:
@@ -166,6 +188,8 @@ def acceptance_mask(
     mask = np.ones(n, dtype=bool)
     mask &= np.all(np.isfinite(fluxes) & (fluxes > min_flux), axis=1)
     mask &= negative_flux_fraction(images) <= max_negative_fraction
+    if target_features is not None:
+        mask &= feature_limits_mask(target_features)
     for key in PHOTO_KEYS:
         values = np.asarray(residuals[key])
         mask &= np.isfinite(values) & (np.abs(values) <= thresholds[key])
@@ -228,6 +252,11 @@ def _plot_histograms(real_features: Dict[str, np.ndarray], accepted_features: Di
             plt.hist(real, bins=50, density=True, histtype="step", linewidth=2, label="Real low-density")
         if accepted.size:
             plt.hist(accepted, bins=50, density=True, histtype="step", linewidth=2, label="Accepted augmented")
+        combined = np.concatenate([real, accepted]) if real.size and accepted.size else real if real.size else accepted
+        if combined.size:
+            lo, hi = np.nanquantile(combined, [0.005, 0.995])
+            if np.isfinite(lo) and np.isfinite(hi) and lo < hi:
+                plt.xlim(lo, hi)
         plt.xlabel(key)
         plt.ylabel("Density")
         plt.title(f"Photometric validation: {key}")
@@ -247,6 +276,17 @@ def _plot_color_color(real_features: Dict[str, np.ndarray], accepted_features: D
         plt.xlabel(x_key)
         plt.ylabel(y_key)
         plt.title(f"Color-color: {x_key} vs {y_key}")
+        x = np.concatenate([real_features[x_key], accepted_features[x_key]])
+        y = np.concatenate([real_features[y_key], accepted_features[y_key]])
+        x = x[np.isfinite(x)]
+        y = y[np.isfinite(y)]
+        if x.size and y.size:
+            xlo, xhi = np.nanquantile(x, [0.005, 0.995])
+            ylo, yhi = np.nanquantile(y, [0.005, 0.995])
+            if xlo < xhi:
+                plt.xlim(xlo, xhi)
+            if ylo < yhi:
+                plt.ylim(ylo, yhi)
         plt.grid(True, alpha=0.3)
         plt.legend(markerscale=3)
         plt.tight_layout()
@@ -367,6 +407,13 @@ def validate_candidates(args: argparse.Namespace) -> None:
         raise RuntimeError("Aucun objet faible densite disponible pour calibrer la validation.")
 
     ref_catalog_mags = catalog_magnitudes_from_metadata(metadata, ref_indices)
+    ref_target_features = photometric_features_from_magnitudes(ref_catalog_mags)
+    ref_valid = feature_limits_mask(ref_target_features)
+    ref_indices = ref_indices[ref_valid]
+    ref_catalog_mags = ref_catalog_mags[ref_valid]
+    if len(ref_indices) == 0:
+        raise RuntimeError("Aucune référence faible densite photometriquement valide pour calibrer la validation.")
+
     zero_points = calibrate_zero_points(dataset.data["x"][ref_indices], ref_catalog_mags)
     ref_img_mags, _ = image_magnitudes(dataset.data["x"][ref_indices], zero_points)
     ref_img_features = photometric_features_from_magnitudes(ref_img_mags)
@@ -388,6 +435,7 @@ def validate_candidates(args: argparse.Namespace) -> None:
         thresholds,
         cand_fluxes,
         x,
+        target_features=target_features,
         max_negative_fraction=args.max_negative_fraction,
     )
 

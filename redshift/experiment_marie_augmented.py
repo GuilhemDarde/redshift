@@ -12,7 +12,7 @@ from torch.utils.data import ConcatDataset, DataLoader, Dataset, Subset, TensorD
 from analysis_utils import aggregate_by_bins, compute_regression_metrics, ensure_dir, write_rows_csv, z_to_bin_indices
 from config import CONFIG
 from data_loader import build_metadata, get_dataset_and_splits
-from density_utils import compute_train_knn_density, low_density_mask
+from density_utils import compute_catalog_knn_density, low_density_mask
 from experiment_marie_baseline import MarieStyleBaseline, meta_from_cond
 from utils import set_global_seed
 
@@ -269,8 +269,16 @@ def run(args: argparse.Namespace) -> None:
         cache_path=args.cache_path,
     )
     metadata = build_metadata(dataset, split_indices=split_indices)
-    density, _ = compute_train_knn_density(metadata["ra"], metadata["dec"], split_indices["train"], k=args.knn_k)
+    density, _ = compute_catalog_knn_density(metadata["ra"], metadata["dec"], k=args.knn_k)
     _, density_threshold = low_density_mask(density, split_indices["train"], quantile=args.low_density_quantile)
+    n_low_test = int(np.sum(density[split_indices["test"]] <= density_threshold))
+    n_test = int(len(split_indices["test"]))
+    logger.info(
+        "Densité catalogue kNN: seuil train q=%.2f -> test low=%s normal=%s",
+        args.low_density_quantile,
+        n_low_test,
+        n_test - n_low_test,
+    )
 
     train_real = Subset(dataset, split_indices["train"])
     test_real = Subset(dataset, split_indices["test"])
