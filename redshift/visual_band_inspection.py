@@ -280,6 +280,76 @@ def _summary_rows(rows: Iterable[Dict[str, float]]) -> List[Dict[str, float]]:
     return summary
 
 
+def _parse_bands(value: str) -> List[str]:
+    bands = [band.strip() for band in value.split(",") if band.strip()]
+    unknown = sorted(set(bands) - set(CONFIG.BAND_NAMES))
+    if unknown:
+        raise ValueError(f"Bandes inconnues: {unknown}")
+    return bands
+
+
+def visual_acceptance_mask(rows: List[Dict[str, float]], args: argparse.Namespace) -> np.ndarray:
+    '''
+    actions : Filtre les augmentations qui changent trop les flux par bande ou qui sont des quasi-copies.
+    inputs : rows (List[Dict]), args
+    appels : _parse_bands, np.isfinite
+    outputs : np.ndarray bool
+    '''
+    core_bands = _parse_bands(args.core_bands)
+    edge_bands = [band for band in CONFIG.BAND_NAMES if band not in core_bands]
+    mask = np.ones(len(rows), dtype=bool)
+    for idx, row in enumerate(rows):
+        median_l1 = row.get("median_relative_l1", float("nan"))
+        neg_frac = row.get("negative_flux_fraction_aug", float("nan"))
+        keep = np.isfinite(median_l1) and np.isfinite(neg_frac)
+        keep &= args.min_median_relative_l1 <= median_l1 <= args.max_median_relative_l1
+        keep &= neg_frac <= args.max_negative_fraction
+
+        for band in core_bands:
+            ratio = row.get(f"flux_ratio_{band}", float("nan"))
+            l1 = row.get(f"relative_l1_{band}", float("nan"))
+            corr = row.get(f"corr_{band}", float("nan"))
+            keep &= np.isfinite(ratio) and args.core_flux_ratio_min <= ratio <= args.core_flux_ratio_max
+            keep &= np.isfinite(l1) and l1 <= args.core_relative_l1_max
+            keep &= np.isfinite(corr) and corr >= args.core_corr_min
+
+        for band in edge_bands:
+            ratio = row.get(f"flux_ratio_{band}", float("nan"))
+            l1 = row.get(f"relative_l1_{band}", float("nan"))
+            corr = row.get(f"corr_{band}", float("nan"))
+            keep &= np.isfinite(ratio) and args.edge_flux_ratio_min <= ratio <= args.edge_flux_ratio_max
+            keep &= np.isfinite(l1) and l1 <= args.edge_relative_l1_max
+            keep &= np.isfinite(corr) and corr >= args.edge_corr_min
+        mask[idx] = bool(keep)
+    return mask
+
+
+def _write_filtered_augmentations(
+    candidates: np.lib.npyio.NpzFile,
+    output_path: str,
+    original_candidate_indices: np.ndarray,
+    visual_mask: np.ndarray,
+    metric_rows: List[Dict[str, float]],
+    n_total_candidates: int,
+) -> None:
+    selected = np.asarray(original_candidate_indices[visual_mask], dtype=np.int64)
+    selected_mask = np.zeros(n_total_candidates, dtype=bool)
+    selected_mask[selected] = True
+    payload = {}
+    for key in candidates.files:
+        arr = candidates[key]
+        if np.asarray(arr).shape[:1] == (n_total_candidates,):
+            payload[key] = arr[selected_mask]
+        else:
+            payload[key] = arr
+    payload["visual_acceptance_mask_candidates"] = selected_mask
+    payload["visual_candidate_index"] = selected
+    for key in ["median_relative_l1", "median_flux_ratio", "negative_flux_fraction_aug"]:
+        payload[f"visual_{key}"] = np.asarray([row[key] for row in metric_rows], dtype=np.float64)[visual_mask]
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    np.savez(output_path, **payload)
+
+
 def _plot_band_metric_summary(summary_rows: List[Dict[str, float]], output_dir: str) -> None:
     if not summary_rows:
         return
@@ -313,14 +383,17 @@ def _plot_band_metric_summary(summary_rows: List[Dict[str, float]], output_dir: 
 
 
 def _write_visual_report(output_dir: str, n_available: int, metric_rows: List[Dict[str, float]], summary_rows: List[Dict[str, float]], args: argparse.Namespace) -> None:
+    visual_mask = visual_acceptance_mask(metric_rows, args)
     lines = [
         "# Visual Band Inspection Report",
         "",
         f"- Augmentation file: `{args.augmentations}`",
         f"- Valid source-linked candidates: `{n_available}`",
         f"- Metric sample size: `{len(metric_rows)}`",
+        f"- Accepted by visual filter: `{int(np.sum(visual_mask))}` (`{100.0 * np.sum(visual_mask) / max(len(visual_mask), 1):.2f}%`)",
         f"- Mode filter: `{args.mode_filter or 'none'}`",
         f"- Selection strategy: `{args.selection}`",
+        f"- Filtered output: `{args.output_filtered or 'none'}`",
         "",
         "## Band Summary",
         "",
@@ -395,6 +468,40 @@ def run(args: argparse.Namespace) -> None:
     write_rows_csv(os.path.join(output_dir, "visual_band_summary.csv"), summary)
     _plot_band_metric_summary(summary, output_dir)
 
+    visual_mask = visual_acceptance_mask(rows, args)
+    write_rows_csv(os.path.join(output_dir, "visual_filter_summary.csv"), [{
+        "available_source_linked_candidates": int(len(candidate_indices)),
+        "evaluated_candidates": int(len(metric_indices)),
+        "accepted_by_visual_filter": int(np.sum(visual_mask)),
+        "acceptance_rate_pct": float(100.0 * np.sum(visual_mask) / max(len(visual_mask), 1)),
+        "core_bands": args.core_bands,
+        "core_flux_ratio_min": args.core_flux_ratio_min,
+        "core_flux_ratio_max": args.core_flux_ratio_max,
+        "edge_flux_ratio_min": args.edge_flux_ratio_min,
+        "edge_flux_ratio_max": args.edge_flux_ratio_max,
+        "core_relative_l1_max": args.core_relative_l1_max,
+        "edge_relative_l1_max": args.edge_relative_l1_max,
+        "core_corr_min": args.core_corr_min,
+        "edge_corr_min": args.edge_corr_min,
+        "min_median_relative_l1": args.min_median_relative_l1,
+        "max_median_relative_l1": args.max_median_relative_l1,
+    }])
+
+    if args.output_filtered is not None:
+        if len(metric_indices) != len(candidate_indices):
+            logger.warning(
+                "Le fichier filtre ne couvrira que %s/%s candidats car --max_metric_samples est actif.",
+                len(metric_indices),
+                len(candidate_indices),
+            )
+        _write_filtered_augmentations(candidates, args.output_filtered, metric_indices, visual_mask, rows, len(x))
+        logger.info(
+            "Augmentations filtrees visuellement sauvegardees: %s (%s/%s)",
+            args.output_filtered,
+            int(np.sum(visual_mask)),
+            len(visual_mask),
+        )
+
     median_l1 = np.asarray([row["median_relative_l1"] for row in rows], dtype=np.float64)
     panel_indices = select_visual_indices(metric_indices, median_l1, args.max_examples, args.seed, args.selection)
     panel_pos = np.asarray([int(np.where(metric_indices == idx)[0][0]) for idx in panel_indices], dtype=np.int64)
@@ -439,5 +546,18 @@ if __name__ == "__main__":
     parser.add_argument("--max_examples", type=int, default=12)
     parser.add_argument("--max_contact_examples", type=int, default=12)
     parser.add_argument("--selection", choices=["mixed", "random", "largest_change"], default="mixed")
+    parser.add_argument("--output_filtered", type=str, default=None)
+    parser.add_argument("--core_bands", type=str, default="g,r,i,z")
+    parser.add_argument("--core_flux_ratio_min", type=float, default=0.90)
+    parser.add_argument("--core_flux_ratio_max", type=float, default=1.08)
+    parser.add_argument("--edge_flux_ratio_min", type=float, default=0.75)
+    parser.add_argument("--edge_flux_ratio_max", type=float, default=1.25)
+    parser.add_argument("--core_relative_l1_max", type=float, default=0.30)
+    parser.add_argument("--edge_relative_l1_max", type=float, default=0.50)
+    parser.add_argument("--core_corr_min", type=float, default=0.97)
+    parser.add_argument("--edge_corr_min", type=float, default=0.90)
+    parser.add_argument("--min_median_relative_l1", type=float, default=0.03)
+    parser.add_argument("--max_median_relative_l1", type=float, default=0.30)
+    parser.add_argument("--max_negative_fraction", type=float, default=0.45)
     parser.add_argument("--seed", type=int, default=CONFIG.SEED)
     run(parser.parse_args())
