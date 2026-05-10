@@ -208,7 +208,56 @@ Lancer les smoke tests sans donnees lourdes:
 python -m unittest discover -s redshift/tests -v
 ```
 
+Priorite actuelle: reproduire Marie/Treyer avant augmentation:
+
+```bash
+# Baseline Marie/Treyer sur COSMOS Ultra Deep spectroscopique uniquement.
+# Si le cache courant ne contient pas la colonne field, reconstruire un cache depuis les NPZ sources.
+python redshift/experiment_marie_treyer_baseline.py \
+  --architecture wide \
+  --field cosmos_ud \
+  --sample_filter spec \
+  --fold_id 0 \
+  --n_folds 5 \
+  --epochs 150 \
+  --patience 25 \
+  --batch_size 64 \
+  --num_workers "$COSMOS_NUM_WORKERS" \
+  --output_dir "$COSMOS_EXP_FOLDER/marie_treyer_baseline_fold0_seed${COSMOS_SEED}" \
+  --seed "$COSMOS_SEED" \
+  --data_parallel
+
+# Les sorties importantes:
+# - metrics_marie_treyer_baseline.csv
+# - figure7_like/figure7_like_treyer.png
+# - figure7_like/metrics_by_z_true.csv
+# - figure7_like/metrics_by_mag_i.csv
+# - figure7_like/metrics_by_mag_support.csv
+```
+
+Relancer les seeds principales avec le meme cross:
+
+```bash
+for SEED in 42 43 44; do
+  python redshift/experiment_marie_treyer_baseline.py \
+    --architecture wide \
+    --field cosmos_ud \
+    --sample_filter spec \
+    --fold_id 0 \
+    --n_folds 5 \
+    --epochs 150 \
+    --patience 25 \
+    --batch_size 64 \
+    --num_workers "$COSMOS_NUM_WORKERS" \
+    --output_dir "$COSMOS_EXP_FOLDER/marie_treyer_baseline_fold0_seed${SEED}" \
+    --seed "$SEED" \
+    --data_parallel
+done
+```
+
 Pipeline augmentation DA-Fusion-like pour Marie baseline:
+
+Note: ce pipeline est exploratoire et doit rester en pause tant que la baseline Marie/Treyer et la figure type Treyer Figure 7 ne sont pas reproduites correctement.
 
 ```bash
 # 1. Generer des candidats depuis vraies galaxies faible densite.

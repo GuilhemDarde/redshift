@@ -1,6 +1,7 @@
 import glob
 import logging
 import os
+import re
 from typing import Dict, Optional, Tuple
 
 import numpy as np
@@ -16,6 +17,75 @@ from config import CONFIG
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+
+def _decode_array(values: np.ndarray) -> np.ndarray:
+    arr = np.asarray(values)
+    if arr.dtype.kind in {"S", "O", "U"}:
+        return np.asarray([
+            v.decode("utf-8", errors="ignore") if isinstance(v, bytes) else str(v)
+            for v in arr
+        ])
+    return arr
+
+
+def normalize_field_label(value: object) -> str:
+    '''
+    actions : Normalise les libelles de champ pour reconnaitre COSMOS Ultra Deep/UDF.
+    inputs : value (object)
+    appels : str, re.sub
+    outputs : str
+    '''
+    text = str(value).strip().lower()
+    text = re.sub(r"[^a-z0-9]+", "_", text).strip("_")
+    if not text:
+        return "unknown"
+    if "cosmos" in text and ("ud" in text or "udf" in text or "ultra" in text or "deep" in text):
+        return "cosmos_ud"
+    if text in {"ud", "udf", "ultradeep", "ultra_deep", "deep"}:
+        return "cosmos_ud"
+    return text
+
+
+def infer_field_labels(info: np.ndarray, names: Tuple[str, ...], file_path: str) -> np.ndarray:
+    '''
+    actions : Tente de deduire le champ observationnel depuis les colonnes info ou le nom de fichier.
+    inputs : info (np.ndarray), names (Tuple[str]), file_path (str)
+    appels : normalize_field_label, _decode_array
+    outputs : np.ndarray[str]
+    '''
+    n = len(info)
+    bool_candidates = ("is_cosmos_ud", "cosmos_ud", "is_ud", "ud", "is_udf", "udf", "ultradeep", "ultra_deep")
+    for key in bool_candidates:
+        if key in names:
+            values = np.asarray(info[key])
+            if values.dtype.kind in {"b", "i", "u", "f"}:
+                return np.where(values.astype(float) > 0, "cosmos_ud", "other").astype("<U32")
+
+    text_candidates = ("field", "field_name", "survey", "area", "region", "layer", "deepfield", "deep_field")
+    for key in text_candidates:
+        if key in names:
+            values = _decode_array(info[key])
+            if values.dtype.kind in {"S", "O", "U"}:
+                return np.asarray([normalize_field_label(v) for v in values], dtype="<U32")
+
+    file_label = normalize_field_label(os.path.basename(file_path))
+    if file_label == "cosmos_ud" or "cosmos_ud" in file_label:
+        return np.full(n, "cosmos_ud", dtype="<U32")
+    return np.full(n, "unknown", dtype="<U32")
+
+
+def _filter_first_axis(data: Dict[str, np.ndarray], mask: np.ndarray) -> Dict[str, np.ndarray]:
+    n = len(mask)
+    filtered = {}
+    for key, value in data.items():
+        arr = np.asarray(value)
+        if arr.shape[:1] == (n,):
+            filtered[key] = arr[mask]
+        else:
+            filtered[key] = value
+    return filtered
+
+
 class CosmosDataset(Dataset):
     '''
     actions : Charge les cubes spectraux COSMOS, croise les coordonnées spatiales avec le catalogue morphologique FITS, normalise les données et construit le tenseur de conditionnement (Dim=7).
@@ -28,6 +98,8 @@ class CosmosDataset(Dataset):
         data_dir: str = CONFIG.DATA_PATH,
         morpho_path: str = CONFIG.MORPHO_PATH,
         region: str = "all",
+        field: str = "all",
+        sample_filter: str = "spec",
         max_files: Optional[int] = None,
         cache_path: Optional[str] = None,
     ) -> None:
@@ -37,16 +109,20 @@ class CosmosDataset(Dataset):
         self.data_dir = data_dir
         self.morpho_path = morpho_path
         self.region = region
+        self.field = field
+        self.sample_filter = sample_filter
         self.cache_path = cache_path if cache_path is not None else CONFIG.PROCESSED_DATASET_PATH
 
         if self.cache_path and max_files is None and os.path.exists(self.cache_path):
-            self.data = self._load_processed_cache(self.cache_path)
+            self.data = self._apply_dataset_filters(self._load_processed_cache(self.cache_path))
             return
 
         self.morpho_data = self._load_morpho_catalog()
-        self.data = self._load_and_process()
+        processed = self._load_and_process()
         if self.cache_path and max_files is None:
+            self.data = processed
             self._save_processed_cache(self.cache_path)
+        self.data = self._apply_dataset_filters(processed)
 
     def _load_processed_cache(self, cache_path: str) -> Dict[str, np.ndarray]:
         logger.info("Chargement du dataset pretraite depuis le cache : %s", cache_path)
@@ -64,8 +140,43 @@ class CosmosDataset(Dataset):
         missing = sorted(required - set(data))
         if missing:
             raise KeyError(f"Cache dataset incomplet {cache_path}. Cles manquantes: {missing}")
+        if "label_type" not in data:
+            data["label_type"] = np.full(len(data["z_true"]), "spec", dtype="<U16")
         logger.info("Dataset charge depuis cache : %s objets. Conditionnement Dim=%s.", len(data["cond"]), data["cond"].shape[1])
         return data
+
+    def _apply_dataset_filters(self, data: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
+        n = len(data["z_true"])
+        mask = np.ones(n, dtype=bool)
+
+        if self.sample_filter not in {"all", "spec"}:
+            raise ValueError("--sample_filter doit valoir all ou spec.")
+        if self.sample_filter == "spec":
+            labels = np.asarray(data.get("label_type", np.full(n, "spec", dtype="<U16"))).astype(str)
+            mask &= labels == "spec"
+
+        if self.field not in {"all", "", None}:
+            if "field" not in data:
+                raise KeyError(
+                    "Le cache ne contient pas la colonne field. Pour utiliser --field cosmos_ud, "
+                    "reconstruisez un cache depuis les fichiers NPZ sources contenant l'information de champ."
+                )
+            wanted = normalize_field_label(self.field)
+            labels = np.asarray([normalize_field_label(v) for v in data["field"]], dtype="<U32")
+            mask &= labels == wanted
+            if not np.any(mask):
+                available = sorted(set(labels.tolist()))
+                raise ValueError(f"Aucun objet pour field={wanted}. Champs disponibles: {available[:20]}")
+
+        filtered = _filter_first_axis(data, mask)
+        logger.info(
+            "Filtres dataset: sample_filter=%s field=%s -> %s/%s objets.",
+            self.sample_filter,
+            self.field,
+            len(filtered["z_true"]),
+            n,
+        )
+        return filtered
 
     def _save_processed_cache(self, cache_path: str) -> None:
         os.makedirs(os.path.dirname(cache_path) or ".", exist_ok=True)
@@ -132,6 +243,7 @@ class CosmosDataset(Dataset):
         logger.info(f"Traitement et Cross-Matching de {len(self.files)} fichiers...")
 
         all_x, all_cond_base, all_re, all_n, all_ra, all_dec, all_flags, all_mags = [], [], [], [], [], [], [], []
+        all_field, all_label_type, all_source_file = [], [], []
         
         morpho_coords = self.morpho_data['coords']
         morpho_re = self.morpho_data['re']
@@ -173,6 +285,9 @@ class CosmosDataset(Dataset):
 
                     cube_valid = cube[mask_base][:, :, :, CONFIG.CHANNELS]
                     info_valid = info[mask_base]
+                    field_valid = infer_field_labels(info_valid, names, f)
+                    label_type_valid = np.full(len(info_valid), "spec", dtype="<U16")
+                    source_file_valid = np.full(len(info_valid), os.path.basename(f), dtype="<U256")
                     flags_valid = flags_all[mask_base] if flags_all is not None else np.full((len(info_valid), len(CONFIG.CHANNELS)), np.nan)
                     
                     batch_coords = SkyCoord(ra=info_valid[ra_key]*u.deg, dec=info_valid[dec_key]*u.deg)
@@ -189,6 +304,9 @@ class CosmosDataset(Dataset):
 
                     info_matched = info_valid[match_mask]
                     flags_matched = flags_valid[match_mask]
+                    field_matched = field_valid[match_mask]
+                    label_type_matched = label_type_valid[match_mask]
+                    source_file_matched = source_file_valid[match_mask]
                     matched_idx = idx[match_mask]
 
                     z_spec = info_matched[z_key]
@@ -231,6 +349,9 @@ class CosmosDataset(Dataset):
                     all_dec.append(dec_matched[region_mask])
                     all_flags.append(flags_matched[region_mask])
                     all_mags.append(mags[region_mask])
+                    all_field.append(field_matched[region_mask])
+                    all_label_type.append(label_type_matched[region_mask])
+                    all_source_file.append(source_file_matched[region_mask])
 
             except Exception as e:
                 logger.warning(f"Erreur de traitement sur le fichier {f} : {e}")
@@ -247,6 +368,9 @@ class CosmosDataset(Dataset):
         dec_concat = np.concatenate(all_dec, axis=0)
         flags_concat = np.concatenate(all_flags, axis=0)
         mags_concat = np.concatenate(all_mags, axis=0)
+        field_concat = np.concatenate(all_field, axis=0)
+        label_type_concat = np.concatenate(all_label_type, axis=0)
+        source_file_concat = np.concatenate(all_source_file, axis=0)
 
         log_re = np.log10(re_concat)
         mu_re = np.mean(log_re)
@@ -273,6 +397,9 @@ class CosmosDataset(Dataset):
             'mag_i': cond_base_concat[:, 1] * 2.0 + 22.0,
             'mags': mags_concat,
             'flags': flags_concat,
+            'field': field_concat,
+            'label_type': label_type_concat,
+            'source_file': source_file_concat,
             're_norm': r_norm,
             'n_norm': n_norm,
         }
@@ -309,6 +436,8 @@ def build_metadata(dataset: CosmosDataset, split_indices: Optional[Dict[str, np.
         "mag_i": dataset.data["mag_i"],
         "re_norm": dataset.data["re_norm"],
         "n_norm": dataset.data["n_norm"],
+        "field": dataset.data.get("field", np.full(len(dataset), "unknown", dtype="<U32")),
+        "label_type": dataset.data.get("label_type", np.full(len(dataset), "spec", dtype="<U16")),
     }
     mags = dataset.data["mags"]
     flags = dataset.data["flags"]
@@ -335,12 +464,22 @@ def export_metadata(
 
 def get_dataset_and_splits(
     region: str = "all",
+    field: str = "all",
+    sample_filter: str = "spec",
     max_files: Optional[int] = None,
     n_folds: Optional[int] = None,
     fold_id: Optional[int] = None,
     cache_path: Optional[str] = None,
 ) -> Tuple[CosmosDataset, Dict[str, np.ndarray]]:
-    dataset = CosmosDataset(CONFIG.DATA_PATH, morpho_path=CONFIG.MORPHO_PATH, region=region, max_files=max_files, cache_path=cache_path)
+    dataset = CosmosDataset(
+        CONFIG.DATA_PATH,
+        morpho_path=CONFIG.MORPHO_PATH,
+        region=region,
+        field=field,
+        sample_filter=sample_filter,
+        max_files=max_files,
+        cache_path=cache_path,
+    )
     split_indices = compute_split_indices(dataset.data["ra"], n_folds=n_folds, fold_id=fold_id)
     return dataset, split_indices
 
@@ -349,6 +488,8 @@ def get_dataloaders(
     batch_size: int = CONFIG.BATCH_SIZE,
     num_workers: int = CONFIG.NUM_WORKERS,
     region: str = "all",
+    field: str = "all",
+    sample_filter: str = "spec",
     max_files: Optional[int] = None,
     n_folds: Optional[int] = None,
     fold_id: Optional[int] = None,
@@ -360,7 +501,15 @@ def get_dataloaders(
     appels : CosmosDataset, np.argsort, Subset, DataLoader
     outputs : Tuple contenant les DataLoaders de Train, Val et Test (Tuple[DataLoader, DataLoader, DataLoader])
     '''
-    full_ds, split_indices = get_dataset_and_splits(region=region, max_files=max_files, n_folds=n_folds, fold_id=fold_id, cache_path=cache_path)
+    full_ds, split_indices = get_dataset_and_splits(
+        region=region,
+        field=field,
+        sample_filter=sample_filter,
+        max_files=max_files,
+        n_folds=n_folds,
+        fold_id=fold_id,
+        cache_path=cache_path,
+    )
     train_idx = split_indices["train"]
     val_idx = split_indices["val"]
     test_idx = split_indices["test"]
