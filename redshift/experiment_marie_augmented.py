@@ -9,7 +9,16 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import ConcatDataset, DataLoader, Dataset, Subset, TensorDataset
 
-from analysis_utils import aggregate_by_bins, compute_regression_metrics, ensure_dir, write_rows_csv, z_to_bin_indices
+from analysis_utils import (
+    aggregate_by_bins,
+    compute_regression_metrics,
+    ensure_dir,
+    magnitude_bin_edges,
+    magnitude_support_definition_rows,
+    magnitude_support_mask,
+    write_rows_csv,
+    z_to_bin_indices,
+)
 from config import CONFIG
 from data_loader import build_metadata, get_dataset_and_splits
 from density_utils import compute_catalog_knn_density, low_density_mask
@@ -181,18 +190,12 @@ def evaluate_subsets(
     ablation: str,
     z_true: np.ndarray,
     z_pred: np.ndarray,
-    test_density: np.ndarray,
-    density_threshold: float,
+    subset_masks: Dict[str, np.ndarray],
     output_dir: str,
 ) -> Dict[str, float]:
     rows = []
-    subsets = {
-        "global": np.ones_like(z_true, dtype=bool),
-        "low_density": test_density <= density_threshold,
-        "normal_density": test_density > density_threshold,
-    }
     global_metrics: Dict[str, float] = {}
-    for subset_name, mask in subsets.items():
+    for subset_name, mask in subset_masks.items():
         metrics = compute_regression_metrics(z_true[mask], z_pred[mask])
         metrics.update({"ablation": ablation, "subset": subset_name})
         rows.append(metrics)
@@ -202,13 +205,78 @@ def evaluate_subsets(
     return global_metrics
 
 
+def build_eval_context(metadata: Dict[str, np.ndarray], split_indices: Dict[str, np.ndarray], args: argparse.Namespace) -> Dict[str, np.ndarray]:
+    train_indices = split_indices["train"]
+    context: Dict[str, np.ndarray] = {}
+    if args.subset_strategy == "density":
+        density, _ = compute_catalog_knn_density(metadata["ra"], metadata["dec"], k=args.knn_k)
+        _, density_threshold = low_density_mask(density, train_indices, quantile=args.low_density_quantile)
+        context["density"] = density
+        context["density_threshold"] = np.array(density_threshold, dtype=np.float64)
+        n_low_test = int(np.sum(density[split_indices["test"]] <= density_threshold))
+        logger.info(
+            "Densité catalogue kNN legacy: seuil train q=%.2f -> test low=%s normal=%s",
+            args.low_density_quantile,
+            n_low_test,
+            len(split_indices["test"]) - n_low_test,
+        )
+        return context
+
+    mag_edges = magnitude_bin_edges(args.mag_i_min, args.mag_i_max, args.mag_i_bins)
+    low_mag, threshold, support_count, mag_bin, train_counts = magnitude_support_mask(
+        metadata["mag_i"],
+        metadata["mag_i"][train_indices],
+        mag_edges,
+        quantile=args.low_mag_support_quantile,
+    )
+    context["mag_i_edges"] = mag_edges
+    context["low_mag_support_mask"] = low_mag
+    context["mag_support_count"] = support_count
+    context["mag_bin"] = mag_bin
+    context["mag_support_threshold"] = np.array(threshold, dtype=np.float64)
+    context["mag_bin_train_counts"] = train_counts
+
+    test_low = int(np.sum(low_mag[split_indices["test"]]))
+    logger.info(
+        "Support magnitude i: seuil train q=%.2f -> count<=%.6g | test low=%s normal=%s",
+        args.low_mag_support_quantile,
+        threshold,
+        test_low,
+        len(split_indices["test"]) - test_low,
+    )
+    return context
+
+
+def subset_masks_for_test(
+    test_indices: np.ndarray,
+    n_eval: int,
+    eval_context: Dict[str, np.ndarray],
+    args: argparse.Namespace,
+) -> Dict[str, np.ndarray]:
+    idx = np.asarray(test_indices[:n_eval], dtype=np.int64)
+    masks: Dict[str, np.ndarray] = {"global": np.ones(n_eval, dtype=bool)}
+    if args.subset_strategy == "density":
+        density = eval_context["density"][idx]
+        threshold = float(eval_context["density_threshold"])
+        masks["low_density_legacy"] = density <= threshold
+        masks["normal_density_legacy"] = density > threshold
+        return masks
+
+    support = eval_context["mag_support_count"][idx]
+    low = eval_context["low_mag_support_mask"][idx]
+    valid = np.isfinite(support)
+    masks["low_mag_support"] = low
+    masks["normal_mag_support"] = valid & ~low
+    return masks
+
+
 def run_single_ablation(
     ablation: str,
     train_real: Dataset,
     test_loader: DataLoader,
     test_indices: np.ndarray,
-    density: np.ndarray,
-    density_threshold: float,
+    metadata: Dict[str, np.ndarray],
+    eval_context: Dict[str, np.ndarray],
     args: argparse.Namespace,
     device: torch.device,
     output_dir: str,
@@ -233,26 +301,54 @@ def run_single_ablation(
 
     torch.save(unwrap_model(model).state_dict(), os.path.join(output_dir, f"marie_augmented_{ablation}.pt"))
     z_true, z_pred = predict(model, test_loader, device, args.limit_batches)
-    test_density = density[test_indices][: len(z_true)]
+    eval_indices = test_indices[: len(z_true)]
+    test_mag_i = metadata["mag_i"][eval_indices]
 
-    np.savez(
-        os.path.join(output_dir, f"predictions_marie_augmented_{ablation}.npz"),
-        z_true=z_true,
-        z_pred=z_pred,
-        density=test_density,
-    )
-    global_metrics = evaluate_subsets(ablation, z_true, z_pred, test_density, density_threshold, output_dir)
+    prediction_payload = {
+        "z_true": z_true,
+        "z_pred": z_pred,
+        "test_indices": eval_indices,
+        "mag_i": test_mag_i,
+    }
+    if args.subset_strategy == "density":
+        test_density = eval_context["density"][eval_indices]
+        prediction_payload["density"] = test_density
+    else:
+        prediction_payload["mag_support_count"] = eval_context["mag_support_count"][eval_indices]
+        prediction_payload["mag_bin"] = eval_context["mag_bin"][eval_indices]
+        prediction_payload["low_mag_support"] = eval_context["low_mag_support_mask"][eval_indices]
+    np.savez(os.path.join(output_dir, f"predictions_marie_augmented_{ablation}.npz"), **prediction_payload)
 
-    d_edges = density_edges(density[np.isfinite(density)], n_bins=args.density_bins)
-    d_rows = aggregate_by_bins(test_density, d_edges, z_true, z_pred)
-    for row in d_rows:
-        row.update({"ablation": ablation})
-    write_rows_csv(os.path.join(output_dir, f"metrics_by_density_{ablation}.csv"), d_rows)
+    subset_masks = subset_masks_for_test(test_indices, len(z_true), eval_context, args)
+    global_metrics = evaluate_subsets(ablation, z_true, z_pred, subset_masks, output_dir)
+
+    if args.subset_strategy == "density":
+        density = eval_context["density"]
+        test_density = density[eval_indices]
+        d_edges = density_edges(density[np.isfinite(density)], n_bins=args.density_bins)
+        d_rows = aggregate_by_bins(test_density, d_edges, z_true, z_pred)
+        for row in d_rows:
+            row.update({"ablation": ablation})
+        write_rows_csv(os.path.join(output_dir, f"metrics_by_density_{ablation}.csv"), d_rows)
 
     z_rows = aggregate_by_bins(z_true, edges, z_true, z_pred)
     for row in z_rows:
         row.update({"ablation": ablation})
     write_rows_csv(os.path.join(output_dir, f"metrics_by_z_true_{ablation}.csv"), z_rows)
+
+    mag_edges = magnitude_bin_edges(args.mag_i_min, args.mag_i_max, args.mag_i_bins)
+    mag_rows = aggregate_by_bins(test_mag_i, mag_edges, z_true, z_pred)
+    for row in mag_rows:
+        row.update({"ablation": ablation})
+        if args.subset_strategy == "mag_support":
+            bin_id = int(row["bin"])
+            row["train_count"] = int(eval_context["mag_bin_train_counts"][bin_id])
+            row["low_mag_support"] = bool(
+                np.isfinite(float(eval_context["mag_support_threshold"]))
+                and row["train_count"] <= float(eval_context["mag_support_threshold"])
+            )
+            row["train_count_threshold"] = float(eval_context["mag_support_threshold"])
+    write_rows_csv(os.path.join(output_dir, f"metrics_by_mag_i_{ablation}.csv"), mag_rows)
     return global_metrics
 
 
@@ -279,16 +375,16 @@ def run(args: argparse.Namespace) -> None:
         cache_path=args.cache_path,
     )
     metadata = build_metadata(dataset, split_indices=split_indices)
-    density, _ = compute_catalog_knn_density(metadata["ra"], metadata["dec"], k=args.knn_k)
-    _, density_threshold = low_density_mask(density, split_indices["train"], quantile=args.low_density_quantile)
-    n_low_test = int(np.sum(density[split_indices["test"]] <= density_threshold))
-    n_test = int(len(split_indices["test"]))
-    logger.info(
-        "Densité catalogue kNN: seuil train q=%.2f -> test low=%s normal=%s",
-        args.low_density_quantile,
-        n_low_test,
-        n_test - n_low_test,
-    )
+    eval_context = build_eval_context(metadata, split_indices, args)
+    if args.subset_strategy == "mag_support":
+        write_rows_csv(
+            os.path.join(output_dir, "mag_support_definition.csv"),
+            magnitude_support_definition_rows(
+                eval_context["mag_i_edges"],
+                eval_context["mag_bin_train_counts"],
+                float(eval_context["mag_support_threshold"]),
+            ),
+        )
 
     train_real = Subset(dataset, split_indices["train"])
     test_real = Subset(dataset, split_indices["test"])
@@ -309,8 +405,8 @@ def run(args: argparse.Namespace) -> None:
                 train_real,
                 test_loader,
                 split_indices["test"],
-                density,
-                density_threshold,
+                metadata,
+                eval_context,
                 args,
                 device,
                 output_dir,
@@ -358,6 +454,11 @@ if __name__ == "__main__":
     parser.add_argument("--n_folds", type=int, default=CONFIG.N_FOLDS)
     parser.add_argument("--fold_id", type=int, default=None)
     parser.add_argument("--cache_path", type=str, default=None)
+    parser.add_argument("--subset_strategy", choices=["mag_support", "density"], default="mag_support")
+    parser.add_argument("--mag_i_min", type=float, default=CONFIG.I_MIN)
+    parser.add_argument("--mag_i_max", type=float, default=CONFIG.I_MAX)
+    parser.add_argument("--mag_i_bins", type=int, default=14)
+    parser.add_argument("--low_mag_support_quantile", type=float, default=0.20)
     parser.add_argument("--knn_k", type=int, default=10)
     parser.add_argument("--low_density_quantile", type=float, default=0.20)
     parser.add_argument("--density_bins", type=int, default=5)

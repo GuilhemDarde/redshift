@@ -7,7 +7,13 @@ import matplotlib.pyplot as plt
 import numpy as np
 from scipy import stats
 
-from analysis_utils import ensure_dir, write_rows_csv
+from analysis_utils import (
+    ensure_dir,
+    magnitude_bin_edges,
+    magnitude_support_definition_rows,
+    magnitude_support_mask,
+    write_rows_csv,
+)
 from config import CONFIG
 from data_loader import build_metadata, get_dataset_and_splits
 from density_utils import compute_train_knn_density, low_density_mask
@@ -241,7 +247,7 @@ def _sample_indices(indices: np.ndarray, max_count: Optional[int], seed: int) ->
     return np.sort(rng.choice(indices, size=max_count, replace=False))
 
 
-def _plot_histograms(real_features: Dict[str, np.ndarray], accepted_features: Dict[str, np.ndarray], output_dir: str) -> None:
+def _plot_histograms(real_features: Dict[str, np.ndarray], accepted_features: Dict[str, np.ndarray], output_dir: str, reference_label: str) -> None:
     for key in PHOTO_KEYS:
         plt.figure(figsize=(7, 5))
         real = np.asarray(real_features[key])
@@ -249,9 +255,9 @@ def _plot_histograms(real_features: Dict[str, np.ndarray], accepted_features: Di
         real = real[np.isfinite(real)]
         accepted = accepted[np.isfinite(accepted)]
         if real.size:
-            plt.hist(real, bins=50, density=True, histtype="step", linewidth=2, label="Real low-density")
+            plt.hist(real, bins=50, density=True, histtype="step", linewidth=2, label=reference_label)
         if accepted.size:
-            plt.hist(accepted, bins=50, density=True, histtype="step", linewidth=2, label="Accepted augmented")
+            plt.hist(accepted, bins=50, density=True, histtype="step", linewidth=2, label="Accepted generated")
         combined = np.concatenate([real, accepted]) if real.size and accepted.size else real if real.size else accepted
         if combined.size:
             lo, hi = np.nanquantile(combined, [0.005, 0.995])
@@ -267,12 +273,12 @@ def _plot_histograms(real_features: Dict[str, np.ndarray], accepted_features: Di
         plt.close()
 
 
-def _plot_color_color(real_features: Dict[str, np.ndarray], accepted_features: Dict[str, np.ndarray], output_dir: str) -> None:
+def _plot_color_color(real_features: Dict[str, np.ndarray], accepted_features: Dict[str, np.ndarray], output_dir: str, reference_label: str) -> None:
     pairs = [("g_r", "r_i"), ("r_i", "i_z")]
     for x_key, y_key in pairs:
         plt.figure(figsize=(6, 6))
-        plt.scatter(real_features[x_key], real_features[y_key], s=4, alpha=0.25, label="Real low-density")
-        plt.scatter(accepted_features[x_key], accepted_features[y_key], s=4, alpha=0.25, label="Accepted augmented")
+        plt.scatter(real_features[x_key], real_features[y_key], s=4, alpha=0.25, label=reference_label)
+        plt.scatter(accepted_features[x_key], accepted_features[y_key], s=4, alpha=0.25, label="Accepted generated")
         plt.xlabel(x_key)
         plt.ylabel(y_key)
         plt.title(f"Color-color: {x_key} vs {y_key}")
@@ -353,7 +359,7 @@ def _distribution_rows(real_features: Dict[str, np.ndarray], accepted_features: 
     return rows
 
 
-def _write_report(output_dir: str, rows: Iterable[Dict[str, float]], n_candidates: int, n_accepted: int, zero_points: np.ndarray, args: argparse.Namespace) -> None:
+def _write_report(output_dir: str, rows: Iterable[Dict[str, float]], n_candidates: int, n_accepted: int, zero_points: np.ndarray, args: argparse.Namespace, reference_label: str) -> None:
     acceptance_rate = 100.0 * n_accepted / max(n_candidates, 1)
     lines = [
         "# Photometric Validation Report",
@@ -361,8 +367,11 @@ def _write_report(output_dir: str, rows: Iterable[Dict[str, float]], n_candidate
         f"- Candidates: `{n_candidates}`",
         f"- Accepted: `{n_accepted}`",
         f"- Acceptance rate: `{acceptance_rate:.2f}%`",
-        f"- kNN density k: `{args.knn_k}`",
-        f"- Low-density quantile: `{args.low_density_quantile}`",
+        f"- Reference selection: `{args.selection_target}`",
+        f"- Reference label: `{reference_label}`",
+        f"- Low magnitude support quantile: `{args.low_mag_support_quantile}`",
+        f"- kNN density k, legacy only: `{args.knn_k}`",
+        f"- Low-density quantile, legacy only: `{args.low_density_quantile}`",
         f"- Residual quantile: `{args.residual_quantile}`",
         "",
         "## Empirical zero-points",
@@ -389,6 +398,36 @@ def _write_report(output_dir: str, rows: Iterable[Dict[str, float]], n_candidate
         f.write("\n".join(lines) + "\n")
 
 
+def select_reference_indices(metadata: Dict[str, np.ndarray], split_indices: Dict[str, np.ndarray], args: argparse.Namespace) -> Tuple[np.ndarray, str, Dict[str, np.ndarray]]:
+    train_indices = split_indices["train"]
+    context: Dict[str, np.ndarray] = {}
+    if args.selection_target == "all_train":
+        return train_indices, "Real train reference", context
+    if args.selection_target == "low_density":
+        density, _ = compute_train_knn_density(metadata["ra"], metadata["dec"], train_indices, k=args.knn_k)
+        low_mask_all, threshold = low_density_mask(density, train_indices, quantile=args.low_density_quantile)
+        context["density_threshold"] = np.array(threshold)
+        return train_indices[low_mask_all[train_indices]], "Real legacy RA/DEC low-density", context
+    if args.selection_target != "low_mag_support":
+        raise ValueError(f"selection_target inconnu: {args.selection_target}")
+
+    edges = magnitude_bin_edges(args.mag_i_min, args.mag_i_max, args.mag_i_bins)
+    low_mask_all, threshold, support_count, mag_bin, train_counts = magnitude_support_mask(
+        metadata["mag_i"],
+        metadata["mag_i"][train_indices],
+        edges,
+        quantile=args.low_mag_support_quantile,
+    )
+    context.update({
+        "mag_i_edges": edges,
+        "low_mag_support_threshold": np.array(threshold),
+        "mag_support_count": support_count,
+        "mag_bin": mag_bin,
+        "mag_bin_train_counts": train_counts,
+    })
+    return train_indices[low_mask_all[train_indices]], "Real low-magnitude-support", context
+
+
 def validate_candidates(args: argparse.Namespace) -> None:
     ensure_dir(args.output_dir)
     dataset, split_indices = get_dataset_and_splits(
@@ -399,12 +438,10 @@ def validate_candidates(args: argparse.Namespace) -> None:
         cache_path=args.cache_path,
     )
     metadata = build_metadata(dataset, split_indices=split_indices)
-    density, _ = compute_train_knn_density(metadata["ra"], metadata["dec"], split_indices["train"], k=args.knn_k)
-    low_mask_all, threshold = low_density_mask(density, split_indices["train"], quantile=args.low_density_quantile)
-    ref_indices = split_indices["train"][low_mask_all[split_indices["train"]]]
+    ref_indices, reference_label, reference_context = select_reference_indices(metadata, split_indices, args)
     ref_indices = _sample_indices(ref_indices, args.max_reference, args.seed)
     if len(ref_indices) == 0:
-        raise RuntimeError("Aucun objet faible densite disponible pour calibrer la validation.")
+        raise RuntimeError("Aucun objet de référence disponible pour calibrer la validation.")
 
     ref_catalog_mags = catalog_magnitudes_from_metadata(metadata, ref_indices)
     ref_target_features = photometric_features_from_magnitudes(ref_catalog_mags)
@@ -412,7 +449,7 @@ def validate_candidates(args: argparse.Namespace) -> None:
     ref_indices = ref_indices[ref_valid]
     ref_catalog_mags = ref_catalog_mags[ref_valid]
     if len(ref_indices) == 0:
-        raise RuntimeError("Aucune référence faible densite photometriquement valide pour calibrer la validation.")
+        raise RuntimeError("Aucune référence photometriquement valide pour calibrer la validation.")
 
     zero_points = calibrate_zero_points(dataset.data["x"][ref_indices], ref_catalog_mags)
     ref_img_mags, _ = image_magnitudes(dataset.data["x"][ref_indices], zero_points)
@@ -464,10 +501,10 @@ def validate_candidates(args: argparse.Namespace) -> None:
         })
     write_rows_csv(os.path.join(args.output_dir, "morphology_summary.csv"), morph_rows)
 
-    _plot_histograms(ref_target_features, accepted_features, args.output_dir)
-    _plot_color_color(ref_target_features, accepted_features, args.output_dir)
+    _plot_histograms(ref_target_features, accepted_features, args.output_dir, reference_label)
+    _plot_color_color(ref_target_features, accepted_features, args.output_dir, reference_label)
     _plot_examples(dataset.data["x"], x, source_index, accepted_mask, args.output_dir)
-    _write_report(args.output_dir, rows, len(x), int(np.sum(accepted_mask)), zero_points, args)
+    _write_report(args.output_dir, rows, len(x), int(np.sum(accepted_mask)), zero_points, args, reference_label)
 
     output_filtered = args.output_filtered or os.path.join(args.output_dir, "cfm_i2i_accepted.npz")
     payload = {}
@@ -479,11 +516,22 @@ def validate_candidates(args: argparse.Namespace) -> None:
             payload[key] = arr
     payload["acceptance_mask_candidates"] = accepted_mask
     payload["zero_points"] = zero_points
-    payload["density_threshold"] = np.array(threshold)
+    payload["selection_target"] = np.array(args.selection_target)
+    for key, value in reference_context.items():
+        payload[f"reference_{key}"] = value
     for key in PHOTO_KEYS:
         payload[f"residual_{key}"] = cand_residuals[key][accepted_mask]
         payload[f"threshold_{key}"] = np.array(thresholds[key])
     np.savez(output_filtered, **payload)
+    if args.selection_target == "low_mag_support":
+        write_rows_csv(
+            os.path.join(args.output_dir, "mag_support_definition.csv"),
+            magnitude_support_definition_rows(
+                reference_context["mag_i_edges"],
+                reference_context["mag_bin_train_counts"],
+                float(reference_context["low_mag_support_threshold"]),
+            ),
+        )
     logger.info("Validation terminee: %s/%s acceptes -> %s", int(np.sum(accepted_mask)), len(x), output_filtered)
 
 
@@ -497,6 +545,11 @@ if __name__ == "__main__":
     parser.add_argument("--n_folds", type=int, default=CONFIG.N_FOLDS)
     parser.add_argument("--fold_id", type=int, default=None)
     parser.add_argument("--cache_path", type=str, default=None)
+    parser.add_argument("--selection_target", choices=["low_mag_support", "all_train", "low_density"], default="low_mag_support")
+    parser.add_argument("--mag_i_min", type=float, default=CONFIG.I_MIN)
+    parser.add_argument("--mag_i_max", type=float, default=CONFIG.I_MAX)
+    parser.add_argument("--mag_i_bins", type=int, default=14)
+    parser.add_argument("--low_mag_support_quantile", type=float, default=0.20)
     parser.add_argument("--knn_k", type=int, default=10)
     parser.add_argument("--low_density_quantile", type=float, default=0.20)
     parser.add_argument("--residual_quantile", type=float, default=0.95)

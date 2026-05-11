@@ -156,8 +156,8 @@ def _plot_contact_sheet(
         axes[row, 0].set_ylabel(f"cand {int(candidate_indices[row])}\nsrc {int(source_indices[row])}", fontsize=8)
         if row == 0:
             axes[row, 0].set_title("Source RGB")
-            axes[row, 1].set_title("Augmented RGB")
-            axes[row, 2].set_title("|Delta| all bands")
+            axes[row, 1].set_title("Generated RGB")
+            axes[row, 2].set_title("Diagnostic |generated-source|")
         for col in range(3):
             axes[row, col].set_xticks([])
             axes[row, col].set_yticks([])
@@ -185,8 +185,8 @@ def _plot_band_panel(
     abs_delta = np.sum(np.abs(aug_linear - source_linear), axis=0)
     axes[0, 2].imshow(_scale_gray(abs_delta, 0.0, _finite_quantile(abs_delta, 0.995, 1.0)), origin="lower", cmap="magma")
     axes[0, 0].set_title("Source RGB")
-    axes[0, 1].set_title("Augmented RGB")
-    axes[0, 2].set_title("|Delta| all bands")
+    axes[0, 1].set_title("Generated RGB")
+    axes[0, 2].set_title("Diagnostic |generated-source|")
 
     for band_idx, band in enumerate(band_names):
         r = band_idx + 1
@@ -213,7 +213,7 @@ def _plot_band_panel(
         ax.set_xticks([])
         ax.set_yticks([])
     fig.suptitle(
-        f"Candidate {candidate_index} from source {source_index} | "
+        f"Generated candidate {candidate_index} from source {source_index} | "
         f"z={row.get('z', float('nan')):.3f} mag_i={row.get('mag_i', float('nan')):.3f}",
         y=0.995,
     )
@@ -364,7 +364,7 @@ def _plot_band_metric_summary(summary_rows: List[Dict[str, float]], output_dir: 
     fig, axes = plt.subplots(1, 3, figsize=(12, 3.5))
     axes[0].errorbar(x, median, yerr=[median - lo, hi - median], fmt="o", capsize=4)
     axes[0].axhline(1.0, color="black", linewidth=1, alpha=0.5)
-    axes[0].set_title("Flux ratio aug/source")
+    axes[0].set_title("Flux ratio generated/source")
     axes[0].set_ylabel("ratio")
     axes[1].bar(x, l1)
     axes[1].set_title("Relative L1")
@@ -410,9 +410,14 @@ def _write_visual_report(output_dir: str, n_available: int, metric_rows: List[Di
         "",
         "## Figures",
         "",
-        "- `rgb_contact_sheet.png`: source, augmentation, absolute residual.",
-        "- `band_panel_*.png`: source/augmentation/residual for every band.",
+        "- `rgb_contact_sheet.png`: source, generated image, and absolute difference diagnostic.",
+        "- `band_panel_*.png`: source/generated image/difference diagnostic for every band.",
         "- `band_metric_summary.png`: band-level flux ratio, L1 and pixel correlation.",
+        "",
+        "Important interpretation:",
+        "",
+        "- The CFM output is the generated image. Difference maps are computed after generation for quality control only.",
+        "- Difference maps must not be presented as the diffusion output or as a noise image.",
         "",
         "Manual checks to report:",
         "",

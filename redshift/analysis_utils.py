@@ -147,6 +147,71 @@ def aggregate_by_bins(
     return rows
 
 
+def magnitude_bin_edges(
+    mag_i_min: float = CONFIG.I_MIN,
+    mag_i_max: float = CONFIG.I_MAX,
+    n_bins: int = 14,
+) -> np.ndarray:
+    if n_bins <= 0:
+        raise ValueError("n_bins doit etre strictement positif.")
+    if mag_i_max <= mag_i_min:
+        raise ValueError("mag_i_max doit etre superieur a mag_i_min.")
+    return np.linspace(float(mag_i_min), float(mag_i_max), int(n_bins) + 1)
+
+
+def magnitude_support_mask(
+    mag_i: np.ndarray,
+    reference_mag_i: np.ndarray,
+    edges: np.ndarray,
+    quantile: float = 0.20,
+) -> Tuple[np.ndarray, float, np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Identifie les objets situes dans les bins de magnitude i les moins representes.
+
+    Le support d'un objet est le nombre d'objets du set de reference dans son bin
+    de magnitude. Les bins rares sont ceux dont le support est inferieur ou egal
+    au quantile demande, calcule uniquement sur les bins non vides du reference.
+    """
+    mag_i = np.asarray(mag_i, dtype=np.float64)
+    reference_mag_i = np.asarray(reference_mag_i, dtype=np.float64)
+    edges = np.asarray(edges, dtype=np.float64)
+    if edges.ndim != 1 or edges.size < 2:
+        raise ValueError("edges doit contenir au moins deux bornes.")
+    if not 0.0 <= quantile <= 1.0:
+        raise ValueError("quantile doit etre dans [0, 1].")
+
+    ref_valid = reference_mag_i[np.isfinite(reference_mag_i)]
+    counts, _ = np.histogram(ref_valid, bins=edges)
+    nonzero = counts[counts > 0]
+    threshold = float(np.quantile(nonzero, quantile)) if nonzero.size else float("nan")
+
+    bin_id = np.digitize(mag_i, edges) - 1
+    bin_id[np.isfinite(mag_i) & (mag_i == edges[-1])] = len(counts) - 1
+    valid = np.isfinite(mag_i) & (bin_id >= 0) & (bin_id < len(counts))
+    support = np.full(len(mag_i), np.nan, dtype=np.float64)
+    support[valid] = counts[bin_id[valid]]
+
+    low = valid & np.isfinite(threshold) & (support <= threshold)
+    return low, threshold, support, bin_id.astype(np.int64), counts.astype(np.int64)
+
+
+def magnitude_support_definition_rows(edges: np.ndarray, counts: np.ndarray, threshold: float) -> List[Dict[str, float]]:
+    rows: List[Dict[str, float]] = []
+    for idx, count in enumerate(np.asarray(counts, dtype=np.int64)):
+        lo = float(edges[idx])
+        hi = float(edges[idx + 1])
+        rows.append({
+            "bin": idx,
+            "bin_min": lo,
+            "bin_max": hi,
+            "bin_center": 0.5 * (lo + hi),
+            "train_count": int(count),
+            "low_mag_support": bool(np.isfinite(threshold) and count <= threshold),
+            "train_count_threshold": threshold,
+        })
+    return rows
+
+
 def write_rows_csv(path: str, rows: Iterable[Dict[str, object]]) -> None:
     rows = list(rows)
     ensure_dir(os.path.dirname(path) or ".")

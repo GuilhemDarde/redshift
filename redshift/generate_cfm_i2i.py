@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 from tqdm import tqdm
 
+from analysis_utils import magnitude_bin_edges, magnitude_support_definition_rows, magnitude_support_mask, write_rows_csv
 from config import CONFIG
 from data_loader import build_metadata, get_dataset_and_splits
 from density_utils import compute_train_knn_density, low_density_mask
@@ -143,6 +144,61 @@ def repeated_sources(source_indices: np.ndarray, n_aug_per_source: int) -> np.nd
     if n_aug_per_source <= 0:
         raise ValueError("n_aug_per_source doit etre strictement positif.")
     return np.repeat(np.asarray(source_indices, dtype=np.int64), n_aug_per_source)
+
+
+def select_source_pool(
+    metadata: dict,
+    split_indices: dict,
+    args: argparse.Namespace,
+) -> Tuple[np.ndarray, dict]:
+    """
+    Selectionne les galaxies source a augmenter.
+
+    Par defaut on suit le retour prof: les sources viennent des bins de magnitude
+    i les moins representes dans le train. Le ciblage RA/DEC reste disponible en
+    legacy pour relire les anciens runs.
+    """
+    n = len(metadata["mag_i"])
+    train_indices = split_indices["train"]
+    density = np.full(n, np.nan, dtype=np.float64)
+    radius = np.full(n, np.nan, dtype=np.float64)
+    density_threshold = float("nan")
+
+    mag_edges = magnitude_bin_edges(args.mag_i_min, args.mag_i_max, args.mag_i_bins)
+    low_mag_mask, mag_threshold, mag_support, mag_bin, mag_counts = magnitude_support_mask(
+        metadata["mag_i"],
+        metadata["mag_i"][train_indices],
+        mag_edges,
+        quantile=args.low_mag_support_quantile,
+    )
+
+    if args.selection_target == "all_train":
+        selected_pool = train_indices
+        target_description = "all_train"
+    elif args.selection_target == "low_mag_support":
+        selected_pool = train_indices[low_mag_mask[train_indices]]
+        target_description = f"low_mag_support<=count {mag_threshold:.6g}"
+    elif args.selection_target == "low_density":
+        density, radius = compute_train_knn_density(metadata["ra"], metadata["dec"], train_indices, k=args.knn_k)
+        low_density, density_threshold = low_density_mask(density, train_indices, quantile=args.low_density_quantile)
+        selected_pool = train_indices[low_density[train_indices]]
+        target_description = f"legacy_low_density<=rho {density_threshold:.6g}"
+    else:
+        raise ValueError(f"selection_target inconnu: {args.selection_target}")
+
+    context = {
+        "density": density,
+        "radius": radius,
+        "density_threshold": density_threshold,
+        "mag_i_edges": mag_edges,
+        "low_mag_support_mask": low_mag_mask,
+        "mag_support_count": mag_support,
+        "mag_bin": mag_bin,
+        "mag_support_threshold": mag_threshold,
+        "mag_bin_train_counts": mag_counts,
+        "target_description": target_description,
+    }
+    return np.asarray(selected_pool, dtype=np.int64), context
 
 
 def append_batch(
@@ -282,14 +338,9 @@ def run(args: argparse.Namespace) -> None:
         cache_path=args.cache_path,
     )
     metadata = build_metadata(dataset, split_indices=split_indices)
-    density, radius = compute_train_knn_density(metadata["ra"], metadata["dec"], split_indices["train"], k=args.knn_k)
-    low_mask_all, density_threshold = low_density_mask(density, split_indices["train"], quantile=args.low_density_quantile)
+    selected_pool, target_context = select_source_pool(metadata, split_indices, args)
 
-    if args.mode == "global":
-        selected = sample_indices(split_indices["train"], args.limit_sources, args.seed)
-    else:
-        low_train = split_indices["train"][low_mask_all[split_indices["train"]]]
-        selected = sample_indices(low_train, args.limit_sources, args.seed)
+    selected = sample_indices(selected_pool, args.limit_sources, args.seed)
 
     if len(selected) == 0:
         raise RuntimeError("Aucune source sélectionnée pour la génération.")
@@ -300,10 +351,10 @@ def run(args: argparse.Namespace) -> None:
     expanded_partners = np.asarray([partner_lookup[int(src)] for src in expanded_sources], dtype=np.int64)
 
     logger.info(
-        "Sources sélectionnées: %s | candidats attendus par mode: %s | densité seuil %.6g",
+        "Sources sélectionnées: %s | candidats attendus par mode: %s | cible: %s",
         len(selected),
         len(expanded_sources),
-        density_threshold,
+        target_context["target_description"],
     )
     model = load_cfm(args.checkpoint or CONFIG.exp_path(CONFIG.CFM_CHECKPOINT), device)
     generator = build_generator(model, args.data_parallel)
@@ -312,7 +363,7 @@ def run(args: argparse.Namespace) -> None:
         generator,
         dataset.data["x"],
         dataset.data["cond"],
-        density,
+        target_context["density"],
         expanded_sources,
         expanded_partners,
         args,
@@ -330,8 +381,23 @@ def run(args: argparse.Namespace) -> None:
         local_density=source_density,
         mode=mode,
         strength=strength,
-        density_threshold=np.array(density_threshold, dtype=np.float64),
-        knn_radius=radius[source_idx],
+        selection_target=np.array(args.selection_target),
+        density_threshold=np.array(target_context["density_threshold"], dtype=np.float64),
+        knn_radius=target_context["radius"][source_idx],
+        mag_i=metadata["mag_i"][source_idx],
+        mag_bin=target_context["mag_bin"][source_idx],
+        mag_support_count=target_context["mag_support_count"][source_idx],
+        low_mag_support_threshold=np.array(target_context["mag_support_threshold"], dtype=np.float64),
+        mag_i_bin_edges=target_context["mag_i_edges"],
+        mag_i_bin_train_counts=target_context["mag_bin_train_counts"],
+    )
+    write_rows_csv(
+        os.path.splitext(output)[0] + "_mag_support_definition.csv",
+        magnitude_support_definition_rows(
+            target_context["mag_i_edges"],
+            target_context["mag_bin_train_counts"],
+            target_context["mag_support_threshold"],
+        ),
     )
     logger.info("Candidats sauvegardés: %s (%s images)", output, len(x))
 
@@ -346,6 +412,11 @@ if __name__ == "__main__":
     parser.add_argument("--n_folds", type=int, default=CONFIG.N_FOLDS)
     parser.add_argument("--fold_id", type=int, default=None)
     parser.add_argument("--cache_path", type=str, default=None)
+    parser.add_argument("--selection_target", choices=["low_mag_support", "all_train", "low_density"], default="low_mag_support")
+    parser.add_argument("--mag_i_min", type=float, default=CONFIG.I_MIN)
+    parser.add_argument("--mag_i_max", type=float, default=CONFIG.I_MAX)
+    parser.add_argument("--mag_i_bins", type=int, default=14)
+    parser.add_argument("--low_mag_support_quantile", type=float, default=0.20)
     parser.add_argument("--knn_k", type=int, default=10)
     parser.add_argument("--low_density_quantile", type=float, default=0.20)
     parser.add_argument("--limit_sources", type=int, default=None)

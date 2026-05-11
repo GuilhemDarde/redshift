@@ -63,7 +63,7 @@ Pour eviter de refaire le cross-match FITS/NPZ a chaque experience, definir `COS
 - `backbone.py`: G-CNN equivariant et tete MDN pour l'estimation probabiliste du redshift.
 - `train.py`: entrainement du generateur CFM.
 - `generate_mass.py`: generation de jeux synthetiques depuis le CFM entraine.
-- `generate_cfm_i2i.py`: augmentation DA-Fusion-like par inversion partielle CFM, ciblage faible densite et interpolation latente.
+- `generate_cfm_i2i.py`: augmentation DA-Fusion-like par inversion partielle CFM, ciblage par faible support en magnitude `i` et interpolation latente.
 - `photometric_validation.py`: filtrage et preuves photometriques des augmentations generees.
 - `experiment_marie_augmented.py`: ablations Marie baseline reel seul vs augmentations classiques/CFM.
 - `experiment_backbone.py`: pre-entrainement synthetique, fine-tuning reel et rapport statistique.
@@ -227,8 +227,11 @@ python redshift/analyze_marie_cv_folds.py \
 # - metrics_global.csv
 # - metrics_by_z_true.csv
 # - metrics_by_mag_i.csv
+# - metrics_by_z_true_marie_style.csv
+# - metrics_by_mag_i_marie_style.csv
 # - metrics_by_mag_support_cv.csv
 # - figure7_like_treyer.png
+# - figure7_marie_style.png
 ```
 
 ```bash
@@ -278,42 +281,64 @@ done
 
 Pipeline augmentation DA-Fusion-like pour Marie baseline:
 
-Note: ce pipeline est exploratoire et doit rester en pause tant que la baseline Marie/Treyer et la figure type Treyer Figure 7 ne sont pas reproduites correctement.
+Note: ce pipeline est exploratoire et ne doit etre relance qu'apres validation de la baseline Marie/Treyer et de la figure type Treyer Figure 7. Le ciblage principal n'est plus la densite RA/DEC: il porte sur les bins de magnitude `i` les moins representes dans le train.
 
 ```bash
-# 1. Generer des candidats depuis vraies galaxies faible densite.
+# 1. Generer des candidats depuis vraies galaxies dans les bins mag_i peu representes.
 python redshift/generate_cfm_i2i.py \
-  --mode both \
+  --mode i2i \
+  --selection_target low_mag_support \
+  --mag_i_bins 14 \
+  --low_mag_support_quantile 0.20 \
+  --n_folds 5 \
+  --fold_id "$FOLD_ID" \
   --checkpoint "$COSMOS_EXP_FOLDER/cfm_model_physics.pt" \
-  --output "$COSMOS_EXP_FOLDER/cfm_aug_candidates_both.npz" \
+  --output "$COSMOS_EXP_FOLDER/cfm_aug_candidates_i2i_lowmag.npz" \
   --n_aug_per_source 2 \
-  --t0 0.55 \
-  --noise_scale 0.08 \
-  --alpha 0.25 \
+  --t0 0.25 \
+  --noise_scale 0.02 \
   --data_parallel
 
 # 2. Filtrer et documenter la coherence photometrique.
 python redshift/photometric_validation.py \
-  --candidates "$COSMOS_EXP_FOLDER/cfm_aug_candidates_both.npz" \
-  --output_filtered "$COSMOS_EXP_FOLDER/cfm_aug_accepted_both.npz" \
-  --output_dir "$COSMOS_EXP_FOLDER/photometry_validation"
+  --candidates "$COSMOS_EXP_FOLDER/cfm_aug_candidates_i2i_lowmag.npz" \
+  --selection_target low_mag_support \
+  --mag_i_bins 14 \
+  --low_mag_support_quantile 0.20 \
+  --n_folds 5 \
+  --fold_id "$FOLD_ID" \
+  --output_filtered "$COSMOS_EXP_FOLDER/cfm_aug_accepted_i2i_lowmag.npz" \
+  --output_dir "$COSMOS_EXP_FOLDER/photometry_validation_i2i_lowmag"
 
-# 3. Entrainer/evaluer uniquement la baseline Marie avec ablations.
+# 3. Inspection visuelle: la sortie du CFM est l'image generee; le delta est seulement un diagnostic.
+python redshift/visual_band_inspection.py \
+  --augmentations "$COSMOS_EXP_FOLDER/cfm_aug_accepted_i2i_lowmag.npz" \
+  --output_filtered "$COSMOS_EXP_FOLDER/cfm_aug_accepted_i2i_lowmag_visualfiltered.npz" \
+  --output_dir "$COSMOS_EXP_FOLDER/visual_band_i2i_lowmag" \
+  --n_folds 5 \
+  --fold_id "$FOLD_ID" \
+  --mode_filter i2i
+
+# 4. Entrainer/evaluer uniquement la baseline Marie avec ablations et test reel.
 python redshift/experiment_marie_augmented.py \
-  --ablations real classic i2i interp classic_i2i \
-  --synthetic_i2i "$COSMOS_EXP_FOLDER/cfm_aug_accepted_both.npz" \
-  --synthetic_interp "$COSMOS_EXP_FOLDER/cfm_aug_accepted_both.npz" \
+  --ablations real classic classic_i2i \
+  --synthetic_i2i "$COSMOS_EXP_FOLDER/cfm_aug_accepted_i2i_lowmag_visualfiltered.npz" \
   --filter_synthetic_mode \
-  --output_dir "$COSMOS_EXP_FOLDER/marie_augmented" \
+  --subset_strategy mag_support \
+  --mag_i_bins 14 \
+  --low_mag_support_quantile 0.20 \
+  --n_folds 5 \
+  --fold_id "$FOLD_ID" \
+  --output_dir "$COSMOS_EXP_FOLDER/marie_augmented_i2i_lowmag" \
   --data_parallel
 ```
 
 Smoke test rapide du pipeline:
 
 ```bash
-python redshift/generate_cfm_i2i.py --mode both --limit_sources 4 --n_aug_per_source 1 --batch_size 2 --steps 2
-python redshift/photometric_validation.py --candidates "$COSMOS_EXP_FOLDER/cfm_aug_candidates_both.npz" --max_reference 64
-python redshift/experiment_marie_augmented.py --ablations real classic --epochs 1 --limit_batches 2
+python redshift/generate_cfm_i2i.py --mode i2i --selection_target low_mag_support --limit_sources 4 --n_aug_per_source 1 --batch_size 2 --steps 2
+python redshift/photometric_validation.py --candidates "$COSMOS_EXP_FOLDER/cfm_aug_candidates_i2i.npz" --selection_target low_mag_support --max_reference 64
+python redshift/experiment_marie_augmented.py --ablations real classic --subset_strategy mag_support --epochs 1 --limit_batches 2
 ```
 
 ## Reproductibilite

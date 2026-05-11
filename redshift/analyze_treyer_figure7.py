@@ -47,14 +47,22 @@ def _row_metrics(z_true: np.ndarray, z_pred: np.ndarray) -> Dict[str, float]:
     metrics = compute_regression_metrics(z_true, z_pred)
     dz = residuals_normalized(np.asarray(z_true), np.asarray(z_pred))
     metrics["mad"] = median_absolute_deviation(dz)
+    finite = dz[np.isfinite(dz)]
+    metrics["median_dz"] = float(np.median(finite)) if finite.size else float("nan")
     return metrics
 
 
 def _bootstrap_errors(z_true: np.ndarray, z_pred: np.ndarray, n_bootstrap: int, seed: int) -> Dict[str, float]:
     if n_bootstrap <= 0 or len(z_true) < 2:
-        return {"bias_err": float("nan"), "mad_err": float("nan"), "sigma_nmad_err": float("nan"), "outlier_rate_err": float("nan")}
+        return {
+            "bias_err": float("nan"),
+            "median_dz_err": float("nan"),
+            "mad_err": float("nan"),
+            "sigma_nmad_err": float("nan"),
+            "outlier_rate_err": float("nan"),
+        }
     rng = np.random.default_rng(seed)
-    values = {"bias": [], "mad": [], "sigma_nmad": [], "outlier_rate": []}
+    values = {"bias": [], "median_dz": [], "mad": [], "sigma_nmad": [], "outlier_rate": []}
     n = len(z_true)
     for _ in range(n_bootstrap):
         idx = rng.integers(0, n, size=n)
@@ -149,6 +157,99 @@ def plot_figure7_like(z_rows: List[Dict[str, float]], mag_rows: List[Dict[str, f
     plt.close()
 
 
+def _metric_array(rows: List[Dict[str, float]], key: str) -> np.ndarray:
+    return np.asarray([row.get(key, np.nan) for row in rows], dtype=float)
+
+
+def _plot_treyer_metric(
+    ax,
+    rows: List[Dict[str, float]],
+    y_key: str,
+    err_key: Optional[str],
+    ylabel: str,
+    color: str,
+    label: str,
+    global_value: float,
+) -> None:
+    x = _metric_array(rows, "bin_center")
+    y = _metric_array(rows, y_key)
+    yerr = _metric_array(rows, err_key) if err_key else None
+    valid = np.isfinite(x) & np.isfinite(y)
+    if yerr is not None and np.isfinite(yerr[valid]).any():
+        ax.errorbar(x[valid], y[valid], yerr=yerr[valid], color=color, marker="o", linewidth=1.8, markersize=4, capsize=2, label=label)
+    else:
+        ax.plot(x[valid], y[valid], color=color, marker="o", linewidth=1.8, markersize=4, label=label)
+    if np.isfinite(global_value):
+        ax.axhline(global_value, color=color, linestyle="--", linewidth=1.2, alpha=0.75)
+    if y_key == "median_dz":
+        ax.axhline(0.0, color="black", linestyle=":", linewidth=1.0, alpha=0.7)
+    ax.set_ylabel(ylabel)
+    ax.grid(False)
+
+
+def _plot_distribution_background(ax, values: np.ndarray, edges: np.ndarray) -> None:
+    finite = np.asarray(values)
+    finite = finite[np.isfinite(finite)]
+    if finite.size == 0:
+        return
+    hist_ax = ax.twinx()
+    hist_ax.hist(finite, bins=edges, histtype="step", color="0.72", linewidth=1.1)
+    hist_ax.set_yticks([])
+    hist_ax.set_ylabel("")
+    hist_ax.set_zorder(0)
+    ax.set_zorder(1)
+    ax.patch.set_alpha(0.0)
+
+
+def _treyer_global_metrics(z_true: np.ndarray, z_pred: np.ndarray) -> Dict[str, float]:
+    row = _row_metrics(z_true, z_pred)
+    return {
+        "median_dz": row["median_dz"],
+        "sigma_nmad": row["sigma_nmad"],
+        "outlier_rate": row["outlier_rate"],
+    }
+
+
+def plot_figure7_marie_style(
+    z_rows: List[Dict[str, float]],
+    mag_rows: List[Dict[str, float]],
+    z_true: np.ndarray,
+    mag_i: np.ndarray,
+    z_edges: np.ndarray,
+    mag_edges: np.ndarray,
+    output_path: str,
+    global_metrics: Dict[str, float],
+    label: str = "Marie CV",
+    color: str = "#1f77b4",
+) -> None:
+    import matplotlib.pyplot as plt
+
+    fig, axes = plt.subplots(3, 2, figsize=(9.5, 7.2), sharex="col")
+    _plot_distribution_background(axes[0, 0], z_true, z_edges)
+    _plot_distribution_background(axes[0, 1], mag_i, mag_edges)
+
+    _plot_treyer_metric(axes[0, 0], z_rows, "median_dz", "median_dz_err", r"Med($\Delta z$)", color, label, global_metrics.get("median_dz", float("nan")))
+    _plot_treyer_metric(axes[1, 0], z_rows, "sigma_nmad", "sigma_nmad_err", r"$\sigma_{MAD}$", color, label, global_metrics.get("sigma_nmad", float("nan")))
+    _plot_treyer_metric(axes[2, 0], z_rows, "outlier_rate", "outlier_rate_err", r"$\eta$%", color, label, global_metrics.get("outlier_rate", float("nan")))
+
+    _plot_treyer_metric(axes[0, 1], mag_rows, "median_dz", "median_dz_err", r"Med($\Delta z$)", color, label, global_metrics.get("median_dz", float("nan")))
+    _plot_treyer_metric(axes[1, 1], mag_rows, "sigma_nmad", "sigma_nmad_err", r"$\sigma_{MAD}$", color, label, global_metrics.get("sigma_nmad", float("nan")))
+    _plot_treyer_metric(axes[2, 1], mag_rows, "outlier_rate", "outlier_rate_err", r"$\eta$%", color, label, global_metrics.get("outlier_rate", float("nan")))
+
+    axes[0, 0].set_title("COSMOS ULTRA DEEP")
+    axes[0, 1].set_title("COSMOS ULTRA DEEP")
+    axes[2, 0].set_xlabel("ZSPEC or ZC2020")
+    axes[2, 1].set_xlabel("MAG")
+    axes[1, 1].legend(loc="best", fontsize=8)
+    for ax in axes[:, 0]:
+        ax.set_xlim(float(z_edges[0]), float(z_edges[-1]))
+    for ax in axes[:, 1]:
+        ax.set_xlim(float(mag_edges[0]), float(mag_edges[-1]))
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=180)
+    plt.close()
+
+
 def make_figure7_report(
     predictions_path: str,
     metadata_path: str,
@@ -171,11 +272,29 @@ def make_figure7_report(
     mag_edges = np.linspace(mag_i_min, mag_i_max, mag_i_bins + 1)
     z_rows = aggregate_treyer_bins(z_true, z_edges, z_true, z_pred, n_bootstrap=bootstrap, seed=seed)
     mag_rows = aggregate_treyer_bins(mag_i, mag_edges, z_true, z_pred, n_bootstrap=bootstrap, seed=seed + 10_000)
+    global_metrics = _treyer_global_metrics(z_true, z_pred)
 
     write_rows_csv(os.path.join(output_dir, "metrics_by_z_true.csv"), z_rows)
     write_rows_csv(os.path.join(output_dir, "metrics_by_mag_i.csv"), mag_rows)
     write_rows_csv(os.path.join(output_dir, "metrics_global.csv"), [_row_metrics(z_true, z_pred)])
     plot_figure7_like(z_rows, mag_rows, os.path.join(output_dir, "figure7_like_treyer.png"))
+
+    marie_z_edges = np.linspace(0.0, min(5.0, CONFIG.Z_MAX), 13)
+    marie_mag_edges = np.linspace(mag_i_min, mag_i_max, mag_i_bins + 1)
+    z_style_rows = aggregate_treyer_bins(z_true, marie_z_edges, z_true, z_pred, n_bootstrap=bootstrap, seed=seed + 20_000)
+    mag_style_rows = aggregate_treyer_bins(mag_i, marie_mag_edges, z_true, z_pred, n_bootstrap=bootstrap, seed=seed + 30_000)
+    write_rows_csv(os.path.join(output_dir, "metrics_by_z_true_marie_style.csv"), z_style_rows)
+    write_rows_csv(os.path.join(output_dir, "metrics_by_mag_i_marie_style.csv"), mag_style_rows)
+    plot_figure7_marie_style(
+        z_style_rows,
+        mag_style_rows,
+        z_true=z_true,
+        mag_i=mag_i,
+        z_edges=marie_z_edges,
+        mag_edges=marie_mag_edges,
+        output_path=os.path.join(output_dir, "figure7_marie_style.png"),
+        global_metrics=global_metrics,
+    )
 
     if "train_mag_i" in predictions:
         support = magnitude_support_rows(
