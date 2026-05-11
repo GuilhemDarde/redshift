@@ -46,6 +46,26 @@ def normalize_field_label(value: object) -> str:
     return text
 
 
+def field_label_from_filename(file_path: str) -> str:
+    '''
+    actions : Déduit la couche COSMOS D/UD depuis le nom du fichier source.
+    inputs : file_path (str)
+    appels : os.path.basename, str.lower
+    outputs : str
+    '''
+    name = os.path.basename(file_path).lower()
+    stem = name[:-4] if name.endswith(".npz") else name
+    if stem.endswith("_ud") or "_ud_" in stem:
+        return "cosmos_ud"
+    if stem.endswith("_d") or "_d_" in stem:
+        return "cosmos_deep"
+    return "unknown"
+
+
+def field_labels_from_source_file(source_file: np.ndarray) -> np.ndarray:
+    return np.asarray([field_label_from_filename(str(path)) for path in source_file], dtype="<U32")
+
+
 def infer_field_labels(info: np.ndarray, names: Tuple[str, ...], file_path: str) -> np.ndarray:
     '''
     actions : Tente de deduire le champ observationnel depuis les colonnes info ou le nom de fichier.
@@ -54,6 +74,10 @@ def infer_field_labels(info: np.ndarray, names: Tuple[str, ...], file_path: str)
     outputs : np.ndarray[str]
     '''
     n = len(info)
+    file_label = field_label_from_filename(file_path)
+    if file_label != "unknown":
+        return np.full(n, file_label, dtype="<U32")
+
     bool_candidates = ("is_cosmos_ud", "cosmos_ud", "is_ud", "ud", "is_udf", "udf", "ultradeep", "ultra_deep")
     for key in bool_candidates:
         if key in names:
@@ -68,9 +92,6 @@ def infer_field_labels(info: np.ndarray, names: Tuple[str, ...], file_path: str)
             if values.dtype.kind in {"S", "O", "U"}:
                 return np.asarray([normalize_field_label(v) for v in values], dtype="<U32")
 
-    file_label = normalize_field_label(os.path.basename(file_path))
-    if file_label == "cosmos_ud" or "cosmos_ud" in file_label:
-        return np.full(n, "cosmos_ud", dtype="<U32")
     return np.full(n, "unknown", dtype="<U32")
 
 
@@ -156,13 +177,16 @@ class CosmosDataset(Dataset):
             mask &= labels == "spec"
 
         if self.field not in {"all", "", None}:
-            if "field" not in data:
+            if "source_file" in data:
+                labels = field_labels_from_source_file(data["source_file"])
+            elif "field" in data:
+                labels = np.asarray([normalize_field_label(v) for v in data["field"]], dtype="<U32")
+            else:
                 raise KeyError(
-                    "Le cache ne contient pas la colonne field. Pour utiliser --field cosmos_ud, "
+                    "Le cache ne contient ni source_file ni field. Pour utiliser --field cosmos_ud, "
                     "reconstruisez un cache depuis les fichiers NPZ sources contenant l'information de champ."
                 )
             wanted = normalize_field_label(self.field)
-            labels = np.asarray([normalize_field_label(v) for v in data["field"]], dtype="<U32")
             mask &= labels == wanted
             if not np.any(mask):
                 available = sorted(set(labels.tolist()))

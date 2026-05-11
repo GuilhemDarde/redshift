@@ -210,6 +210,27 @@ python -m unittest discover -s redshift/tests -v
 
 Priorite actuelle: reproduire Marie/Treyer avant augmentation:
 
+Reference officielle Marie/Treyer depuis les 5 folds fournis:
+
+```bash
+# Analyse directe depuis le tar, sans extraction complete.
+python redshift/analyze_marie_cv_folds.py \
+  --folds_tar "$COSMOS_EXP_FOLDER/exp00000001_complete.tar" \
+  --output_dir "$COSMOS_EXP_FOLDER/marie_cv_concat_reference" \
+  --bootstrap 100 \
+  --strict_unique_indices
+
+# Sorties principales:
+# - predictions_marie_cv_concat.npz
+# - metadata_marie_cv_concat.npz
+# - metrics_by_fold.csv
+# - metrics_global.csv
+# - metrics_by_z_true.csv
+# - metrics_by_mag_i.csv
+# - metrics_by_mag_support_cv.csv
+# - figure7_like_treyer.png
+```
+
 ```bash
 # Baseline Marie/Treyer sur COSMOS Ultra Deep spectroscopique uniquement.
 # Si le cache courant ne contient pas la colonne field, reconstruire un cache depuis les NPZ sources.

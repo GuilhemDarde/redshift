@@ -3,7 +3,6 @@ import logging
 import os
 from typing import Dict, List, Optional, Tuple
 
-import matplotlib.pyplot as plt
 import numpy as np
 
 from analysis_utils import compute_regression_metrics, ensure_dir, load_metadata, residuals_normalized, write_rows_csv
@@ -128,6 +127,8 @@ def _plot_metric(ax, rows: List[Dict[str, float]], y_key: str, err_key: Optional
 
 
 def plot_figure7_like(z_rows: List[Dict[str, float]], mag_rows: List[Dict[str, float]], output_path: str) -> None:
+    import matplotlib.pyplot as plt
+
     fig, axes = plt.subplots(4, 2, figsize=(11, 10), sharex="col")
     groups = [(z_rows, "z true"), (mag_rows, "mag i")]
     for col, (rows, xlabel) in enumerate(groups):
