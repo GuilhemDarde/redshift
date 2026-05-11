@@ -112,7 +112,17 @@ outputs : None
 def train(args: argparse.Namespace) -> None:
     set_global_seed(args.seed)
     device = torch.device(CONFIG.DEVICE)
-    train_loader, val_loader, _ = get_dataloaders(batch_size=args.batch_size, num_workers=args.num_workers)
+    train_loader, val_loader, _ = get_dataloaders(
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+        region=args.region,
+        field=args.field,
+        sample_filter=args.sample_filter,
+        max_files=args.max_files,
+        n_folds=args.n_folds if args.fold_id is not None else None,
+        fold_id=args.fold_id,
+        cache_path=args.cache_path,
+    )
     
     base_cfm = ConditionalFlowMatching(num_timesteps=CONFIG.TIMESTEPS)
     model = OT_CFM_Physics_Wrapper(base_cfm, lambda_photo=args.lambda_photo).to(device)
@@ -121,7 +131,8 @@ def train(args: argparse.Namespace) -> None:
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
     scaler = get_scaler()
     best_loss = float('inf')
-    save_path = CONFIG.exp_path(CONFIG.CFM_CHECKPOINT)
+    save_path = args.output_checkpoint or CONFIG.exp_path(CONFIG.CFM_CHECKPOINT)
+    os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
 
     for ep in range(args.epochs):
         t_loss = train_epoch(model, train_loader, optimizer, scaler, device)
@@ -143,5 +154,13 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=CONFIG.SEED)
     parser.add_argument("--lr", type=float, default=CONFIG.LR)
     parser.add_argument("--lambda_photo", type=float, default=0.01)
+    parser.add_argument("--region", choices=["all", "stripe82"], default="all")
+    parser.add_argument("--field", type=str, default="all")
+    parser.add_argument("--sample_filter", choices=["all", "spec"], default="spec")
+    parser.add_argument("--max_files", type=int, default=None)
+    parser.add_argument("--n_folds", type=int, default=CONFIG.N_FOLDS)
+    parser.add_argument("--fold_id", type=int, default=None)
+    parser.add_argument("--cache_path", type=str, default=None)
+    parser.add_argument("--output_checkpoint", type=str, default=None)
     parser.add_argument("--data_parallel", action="store_true")
     train(parser.parse_args())

@@ -332,6 +332,8 @@ def run(args: argparse.Namespace) -> None:
     device = torch.device(CONFIG.DEVICE)
     dataset, split_indices = get_dataset_and_splits(
         region=args.region,
+        field=args.field,
+        sample_filter=args.sample_filter,
         max_files=args.max_files,
         n_folds=args.n_folds if args.fold_id is not None else None,
         fold_id=args.fold_id,
@@ -408,6 +410,8 @@ if __name__ == "__main__":
     parser.add_argument("--checkpoint", type=str, default=None)
     parser.add_argument("--output", type=str, default=None)
     parser.add_argument("--region", choices=["all", "stripe82"], default="all")
+    parser.add_argument("--field", type=str, default="all")
+    parser.add_argument("--sample_filter", choices=["all", "spec"], default="spec")
     parser.add_argument("--max_files", type=int, default=None)
     parser.add_argument("--n_folds", type=int, default=CONFIG.N_FOLDS)
     parser.add_argument("--fold_id", type=int, default=None)

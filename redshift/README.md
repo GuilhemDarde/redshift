@@ -288,6 +288,8 @@ Note: ce pipeline est exploratoire et ne doit etre relance qu'apres validation d
 python redshift/generate_cfm_i2i.py \
   --mode i2i \
   --selection_target low_mag_support \
+  --field cosmos_ud \
+  --sample_filter spec \
   --mag_i_bins 14 \
   --low_mag_support_quantile 0.20 \
   --n_folds 5 \
@@ -303,6 +305,8 @@ python redshift/generate_cfm_i2i.py \
 python redshift/photometric_validation.py \
   --candidates "$COSMOS_EXP_FOLDER/cfm_aug_candidates_i2i_lowmag.npz" \
   --selection_target low_mag_support \
+  --field cosmos_ud \
+  --sample_filter spec \
   --mag_i_bins 14 \
   --low_mag_support_quantile 0.20 \
   --n_folds 5 \
@@ -315,6 +319,8 @@ python redshift/visual_band_inspection.py \
   --augmentations "$COSMOS_EXP_FOLDER/cfm_aug_accepted_i2i_lowmag.npz" \
   --output_filtered "$COSMOS_EXP_FOLDER/cfm_aug_accepted_i2i_lowmag_visualfiltered.npz" \
   --output_dir "$COSMOS_EXP_FOLDER/visual_band_i2i_lowmag" \
+  --field cosmos_ud \
+  --sample_filter spec \
   --n_folds 5 \
   --fold_id "$FOLD_ID" \
   --mode_filter i2i
@@ -325,6 +331,8 @@ python redshift/experiment_marie_augmented.py \
   --synthetic_i2i "$COSMOS_EXP_FOLDER/cfm_aug_accepted_i2i_lowmag_visualfiltered.npz" \
   --filter_synthetic_mode \
   --subset_strategy mag_support \
+  --field cosmos_ud \
+  --sample_filter spec \
   --mag_i_bins 14 \
   --low_mag_support_quantile 0.20 \
   --n_folds 5 \
