@@ -10,8 +10,11 @@ __pycache__/
 *.npz
 *.npy
 *.fits
+*.tar
+*.tar.part_*
 data/
 catalogs/
+fold_UD_Marie/
 
 # Expériences & Modèles
 *.pt
