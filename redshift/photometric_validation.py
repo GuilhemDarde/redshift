@@ -16,7 +16,7 @@ from analysis_utils import (
 )
 from config import CONFIG
 from data_loader import build_metadata, get_dataset_and_splits
-from density_utils import compute_train_knn_density, low_density_mask
+from density_utils import compute_train_knn_density, low_density_mask, low_support_by_radius_mask, standardized_knn_radius
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -129,6 +129,14 @@ def photometric_features_from_conditions(cond: np.ndarray) -> Dict[str, np.ndarr
         "r_i": cond[:, 3],
         "i_z": cond[:, 4],
     }
+
+
+def photometric_support_matrix(metadata: Dict[str, np.ndarray]) -> np.ndarray:
+    mag_i = np.asarray(metadata["mag_i"], dtype=np.float64)
+    g_r = np.asarray(metadata["mag_g"], dtype=np.float64) - np.asarray(metadata["mag_r"], dtype=np.float64)
+    r_i = np.asarray(metadata["mag_r"], dtype=np.float64) - mag_i
+    i_z = mag_i - np.asarray(metadata["mag_z"], dtype=np.float64)
+    return np.column_stack([mag_i, g_r, r_i, i_z])
 
 
 def residuals_from_features(observed: Dict[str, np.ndarray], target: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
@@ -412,6 +420,28 @@ def select_reference_indices(metadata: Dict[str, np.ndarray], split_indices: Dic
         low_mask_all, threshold = low_density_mask(density, train_indices, quantile=args.low_density_quantile)
         context["density_threshold"] = np.array(threshold)
         return train_indices[low_mask_all[train_indices]], "Real legacy RA/DEC low-density", context
+    if args.selection_target in {"low_photometric_support", "faint_low_photometric_support"}:
+        radius = standardized_knn_radius(
+            photometric_support_matrix(metadata),
+            train_indices,
+            k=args.photometric_support_k,
+        )
+        low_mask_all, threshold = low_support_by_radius_mask(
+            radius,
+            train_indices,
+            fraction=args.low_photometric_support_fraction,
+        )
+        selected = low_mask_all[train_indices]
+        label = "Real low-photometric-support"
+        if args.selection_target == "faint_low_photometric_support":
+            selected &= metadata["mag_i"][train_indices] >= args.faint_mag_threshold
+            label = f"Real faint low-photometric-support mag_i >= {args.faint_mag_threshold:.2f}"
+        context.update({
+            "photometric_support_radius": radius,
+            "low_photometric_support_threshold": np.array(threshold),
+            "low_photometric_support_fraction": np.array(args.low_photometric_support_fraction),
+        })
+        return train_indices[selected], label, context
     if args.selection_target != "low_mag_support":
         raise ValueError(f"selection_target inconnu: {args.selection_target}")
 
@@ -555,12 +585,18 @@ if __name__ == "__main__":
     parser.add_argument("--fold_id", type=int, default=None)
     parser.add_argument("--cache_path", type=str, default=None)
     parser.add_argument("--split_strategy", choices=["spatial", "marie_regular", "marie_strict"], default="spatial")
-    parser.add_argument("--selection_target", choices=["low_mag_support", "faint_mag", "all_train", "low_density"], default="low_mag_support")
+    parser.add_argument(
+        "--selection_target",
+        choices=["low_mag_support", "low_photometric_support", "faint_low_photometric_support", "faint_mag", "all_train", "low_density"],
+        default="low_mag_support",
+    )
     parser.add_argument("--faint_mag_threshold", type=float, default=23.5)
     parser.add_argument("--mag_i_min", type=float, default=CONFIG.I_MIN)
     parser.add_argument("--mag_i_max", type=float, default=CONFIG.I_MAX)
     parser.add_argument("--mag_i_bins", type=int, default=14)
     parser.add_argument("--low_mag_support_quantile", type=float, default=0.20)
+    parser.add_argument("--low_photometric_support_fraction", type=float, default=0.20)
+    parser.add_argument("--photometric_support_k", type=int, default=10)
     parser.add_argument("--knn_k", type=int, default=10)
     parser.add_argument("--low_density_quantile", type=float, default=0.20)
     parser.add_argument("--residual_quantile", type=float, default=0.95)

@@ -11,7 +11,7 @@ from tqdm import tqdm
 from analysis_utils import magnitude_bin_edges, magnitude_support_definition_rows, magnitude_support_mask, write_rows_csv
 from config import CONFIG
 from data_loader import build_metadata, get_dataset_and_splits
-from density_utils import compute_train_knn_density, low_density_mask
+from density_utils import compute_train_knn_density, low_density_mask, low_support_by_radius_mask, standardized_knn_radius
 from model import ConditionalFlowMatching
 from utils import set_global_seed
 
@@ -146,6 +146,14 @@ def repeated_sources(source_indices: np.ndarray, n_aug_per_source: int) -> np.nd
     return np.repeat(np.asarray(source_indices, dtype=np.int64), n_aug_per_source)
 
 
+def photometric_support_features(metadata: dict) -> np.ndarray:
+    mag_i = np.asarray(metadata["mag_i"], dtype=np.float64)
+    g_r = np.asarray(metadata["mag_g"], dtype=np.float64) - np.asarray(metadata["mag_r"], dtype=np.float64)
+    r_i = np.asarray(metadata["mag_r"], dtype=np.float64) - mag_i
+    i_z = mag_i - np.asarray(metadata["mag_z"], dtype=np.float64)
+    return np.column_stack([mag_i, g_r, r_i, i_z])
+
+
 def select_source_pool(
     metadata: dict,
     split_indices: dict,
@@ -163,6 +171,9 @@ def select_source_pool(
     density = np.full(n, np.nan, dtype=np.float64)
     radius = np.full(n, np.nan, dtype=np.float64)
     density_threshold = float("nan")
+    photometric_radius = np.full(n, np.nan, dtype=np.float64)
+    photometric_threshold = float("nan")
+    low_photo_mask = np.zeros(n, dtype=bool)
 
     mag_edges = magnitude_bin_edges(args.mag_i_min, args.mag_i_max, args.mag_i_bins)
     low_mag_mask, mag_threshold, mag_support, mag_bin, mag_counts = magnitude_support_mask(
@@ -181,6 +192,27 @@ def select_source_pool(
     elif args.selection_target == "low_mag_support":
         selected_pool = train_indices[low_mag_mask[train_indices]]
         target_description = f"low_mag_support<=count {mag_threshold:.6g}"
+    elif args.selection_target in {"low_photometric_support", "faint_low_photometric_support"}:
+        photometric_radius = standardized_knn_radius(
+            photometric_support_features(metadata),
+            train_indices,
+            k=args.photometric_support_k,
+        )
+        low_photo_mask, photometric_threshold = low_support_by_radius_mask(
+            photometric_radius,
+            train_indices,
+            fraction=args.low_photometric_support_fraction,
+        )
+        selected = low_photo_mask[train_indices]
+        if args.selection_target == "faint_low_photometric_support":
+            selected &= metadata["mag_i"][train_indices] >= args.faint_mag_threshold
+            target_description = (
+                f"faint_low_photometric_support radius>={photometric_threshold:.6g} "
+                f"mag_i>={args.faint_mag_threshold:.3f}"
+            )
+        else:
+            target_description = f"low_photometric_support radius>={photometric_threshold:.6g}"
+        selected_pool = train_indices[selected]
     elif args.selection_target == "low_density":
         density, radius = compute_train_knn_density(metadata["ra"], metadata["dec"], train_indices, k=args.knn_k)
         low_density, density_threshold = low_density_mask(density, train_indices, quantile=args.low_density_quantile)
@@ -199,6 +231,9 @@ def select_source_pool(
         "mag_bin": mag_bin,
         "mag_support_threshold": mag_threshold,
         "mag_bin_train_counts": mag_counts,
+        "photometric_support_radius": photometric_radius,
+        "low_photometric_support_mask": low_photo_mask,
+        "low_photometric_support_threshold": photometric_threshold,
         "target_description": target_description,
     }
     return np.asarray(selected_pool, dtype=np.int64), context
@@ -396,6 +431,9 @@ def run(args: argparse.Namespace) -> None:
         low_mag_support_threshold=np.array(target_context["mag_support_threshold"], dtype=np.float64),
         mag_i_bin_edges=target_context["mag_i_edges"],
         mag_i_bin_train_counts=target_context["mag_bin_train_counts"],
+        photometric_support_radius=target_context["photometric_support_radius"][source_idx],
+        low_photometric_support_threshold=np.array(target_context["low_photometric_support_threshold"], dtype=np.float64),
+        low_photometric_support_fraction=np.array(args.low_photometric_support_fraction, dtype=np.float64),
     )
     write_rows_csv(
         os.path.splitext(output)[0] + "_mag_support_definition.csv",
@@ -421,12 +459,18 @@ if __name__ == "__main__":
     parser.add_argument("--fold_id", type=int, default=None)
     parser.add_argument("--cache_path", type=str, default=None)
     parser.add_argument("--split_strategy", choices=["spatial", "marie_regular", "marie_strict"], default="spatial")
-    parser.add_argument("--selection_target", choices=["low_mag_support", "faint_mag", "all_train", "low_density"], default="low_mag_support")
+    parser.add_argument(
+        "--selection_target",
+        choices=["low_mag_support", "low_photometric_support", "faint_low_photometric_support", "faint_mag", "all_train", "low_density"],
+        default="low_mag_support",
+    )
     parser.add_argument("--faint_mag_threshold", type=float, default=23.5)
     parser.add_argument("--mag_i_min", type=float, default=CONFIG.I_MIN)
     parser.add_argument("--mag_i_max", type=float, default=CONFIG.I_MAX)
     parser.add_argument("--mag_i_bins", type=int, default=14)
     parser.add_argument("--low_mag_support_quantile", type=float, default=0.20)
+    parser.add_argument("--low_photometric_support_fraction", type=float, default=0.20)
+    parser.add_argument("--photometric_support_k", type=int, default=10)
     parser.add_argument("--knn_k", type=int, default=10)
     parser.add_argument("--low_density_quantile", type=float, default=0.20)
     parser.add_argument("--limit_sources", type=int, default=None)
