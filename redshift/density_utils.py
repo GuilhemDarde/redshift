@@ -127,6 +127,73 @@ def compute_catalog_knn_density(
     return density, kth_radius
 
 
+def standardized_knn_radius(
+    features: np.ndarray,
+    reference_indices: np.ndarray,
+    k: int = 10,
+) -> np.ndarray:
+    '''
+    actions : Calcule la distance au k-ieme voisin train dans un espace de features standardise sur le train.
+    inputs : features (np.ndarray), reference_indices (np.ndarray), k (int)
+    appels : np.nanmean, np.nanstd, _query_knn_distances
+    outputs : np.ndarray
+    '''
+    features = np.asarray(features, dtype=np.float64)
+    reference_indices = np.asarray(reference_indices, dtype=np.int64)
+    if features.ndim != 2:
+        raise ValueError("features doit etre une matrice 2D.")
+    if reference_indices.size < 2:
+        return np.full(features.shape[0], np.nan, dtype=np.float64)
+
+    ref = features[reference_indices]
+    mean = np.nanmean(ref, axis=0)
+    std = np.nanstd(ref, axis=0)
+    std = np.where(np.isfinite(std) & (std > 1e-8), std, 1.0)
+    normalized = (features - mean[None, :]) / std[None, :]
+    normalized = np.nan_to_num(normalized, nan=0.0, posinf=0.0, neginf=0.0)
+    ref_normalized = normalized[reference_indices]
+
+    k_eff = int(max(1, min(k, reference_indices.size - 1)))
+    dist, idx = _query_knn_distances(ref_normalized, normalized, k=min(k_eff + 1, reference_indices.size))
+    if dist.ndim == 1:
+        dist = dist[:, None]
+        idx = idx[:, None]
+
+    source_pos = np.full(features.shape[0], -1, dtype=np.int64)
+    source_pos[reference_indices] = np.arange(reference_indices.size)
+    radius = np.empty(features.shape[0], dtype=np.float64)
+    for row in range(features.shape[0]):
+        row_dist = dist[row]
+        row_idx = idx[row]
+        pos = source_pos[row]
+        if pos >= 0:
+            row_dist = row_dist[row_idx != pos]
+        radius[row] = row_dist[min(k_eff - 1, row_dist.size - 1)] if row_dist.size else np.nan
+    return radius
+
+
+def low_support_by_radius_mask(radius: np.ndarray, reference_indices: np.ndarray, fraction: float = 0.20) -> Tuple[np.ndarray, float]:
+    '''
+    actions : Selectionne les objets les plus eloignes du support train selon une fraction haute de rayon kNN.
+    inputs : radius (np.ndarray), reference_indices (np.ndarray), fraction (float)
+    appels : np.quantile, np.isfinite
+    outputs : Tuple[np.ndarray, float]
+    '''
+    radius = np.asarray(radius, dtype=np.float64)
+    reference_indices = np.asarray(reference_indices, dtype=np.int64)
+    if not 0.0 < fraction < 1.0:
+        raise ValueError("fraction doit etre dans ]0, 1[.")
+
+    ref_values = radius[reference_indices]
+    ref_values = ref_values[np.isfinite(ref_values)]
+    if ref_values.size == 0:
+        threshold = float("nan")
+        return np.zeros_like(radius, dtype=bool), threshold
+
+    threshold = float(np.quantile(ref_values, 1.0 - fraction))
+    return np.isfinite(radius) & (radius >= threshold), threshold
+
+
 def low_density_mask(density: np.ndarray, reference_indices: np.ndarray, quantile: float = 0.20) -> Tuple[np.ndarray, float]:
     '''
     actions : Sélectionne les objets sous un quantile de densité mesuré sur une population de référence.

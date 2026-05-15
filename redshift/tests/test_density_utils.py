@@ -6,7 +6,14 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 import numpy as np
 
-from density_utils import compute_catalog_knn_density, compute_train_knn_density, low_density_mask, projected_radec_coordinates
+from density_utils import (
+    compute_catalog_knn_density,
+    compute_train_knn_density,
+    low_density_mask,
+    low_support_by_radius_mask,
+    projected_radec_coordinates,
+    standardized_knn_radius,
+)
 
 
 class DensityUtilsTests(unittest.TestCase):
@@ -41,6 +48,24 @@ class DensityUtilsTests(unittest.TestCase):
         self.assertEqual(radius.shape, ra.shape)
         self.assertTrue(np.isfinite(density).all())
         self.assertGreater(density[1], density[-1])
+
+    def test_standardized_knn_radius_marks_far_feature_support(self):
+        features = np.array([
+            [0.0, 0.0],
+            [0.1, 0.0],
+            [0.2, 0.0],
+            [5.0, 5.0],
+            [6.0, 6.0],
+        ])
+        train_idx = np.arange(len(features))
+
+        radius = standardized_knn_radius(features, train_idx, k=1)
+        mask, threshold = low_support_by_radius_mask(radius, train_idx, fraction=0.4)
+
+        self.assertEqual(radius.shape, (5,))
+        self.assertTrue(np.isfinite(threshold))
+        self.assertTrue(mask[-1])
+        self.assertFalse(mask[1])
 
 
 if __name__ == "__main__":

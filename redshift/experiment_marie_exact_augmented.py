@@ -24,6 +24,7 @@ from analysis_utils import (
 from analyze_treyer_figure7 import make_figure7_report
 from config import CONFIG
 from data_loader import build_metadata, get_dataset_and_splits
+from density_utils import low_support_by_radius_mask, standardized_knn_radius
 from marie_treyer_exact import (
     build_marie_treyer_model,
     marie_point_estimate,
@@ -363,19 +364,42 @@ def build_train_dataset(
 def eval_subsets(
     ablation: str,
     pred: Dict[str, np.ndarray],
-    train_mag_i: np.ndarray,
+    dataset_data: Dict[str, np.ndarray],
+    train_indices: np.ndarray,
     args: argparse.Namespace,
     output_dir: str,
 ) -> Dict[str, float]:
     edges = magnitude_bin_edges(args.mag_i_min, args.mag_i_max, args.mag_i_bins)
+    train_mag_i = dataset_data["mag_i"][train_indices]
     low, threshold, support, mag_bin, counts = magnitude_support_mask(pred["mag_i"], train_mag_i, edges, quantile=args.low_mag_support_quantile)
+
+    eval_indices = pred["index"].astype(np.int64)
+    cond = np.asarray(dataset_data["cond"], dtype=np.float64)
+    photometric_features = np.column_stack([
+        np.asarray(dataset_data["mag_i"], dtype=np.float64),
+        cond[:, 2],
+        cond[:, 3],
+        cond[:, 4],
+    ])
+    photo_radius = standardized_knn_radius(photometric_features, train_indices, k=args.photometric_support_k)
+    low_photo_all, photo_threshold = low_support_by_radius_mask(
+        photo_radius,
+        train_indices,
+        fraction=args.low_photometric_support_fraction,
+    )
+    low_photo = low_photo_all[eval_indices]
+    valid_photo = np.isfinite(photo_radius[eval_indices])
+    faint = pred["mag_i"] >= args.faint_mag_threshold
     rows = []
     for name, mask in [
         ("global", np.ones(len(pred["z_true"]), dtype=bool)),
         ("low_mag_support", low),
         ("normal_mag_support", np.isfinite(support) & ~low),
-        ("faint_mag", pred["mag_i"] >= args.faint_mag_threshold),
-        ("normal_faint_mag", pred["mag_i"] < args.faint_mag_threshold),
+        ("low_photometric_support", low_photo),
+        ("normal_photometric_support", valid_photo & ~low_photo),
+        ("faint_and_low_photometric_support", faint & low_photo),
+        ("faint_mag", faint),
+        ("normal_faint_mag", ~faint),
     ]:
         row = compute_regression_metrics(pred["z_true"][mask], pred["z_pred"][mask])
         row.update({"ablation": ablation, "subset": name})
@@ -385,6 +409,14 @@ def eval_subsets(
         os.path.join(output_dir, "mag_support_definition.csv"),
         magnitude_support_definition_rows(edges, counts, threshold),
     )
+    write_rows_csv(os.path.join(output_dir, "photometric_support_definition.csv"), [{
+        "feature_space": "mag_i,g-r,r-i,i-z",
+        "k": args.photometric_support_k,
+        "low_support_fraction": args.low_photometric_support_fraction,
+        "radius_threshold": photo_threshold,
+        "train_low_support_n": int(np.sum(low_photo_all[train_indices])),
+        "eval_low_support_n": int(np.sum(low_photo)),
+    }])
     return rows[0]
 
 
@@ -437,7 +469,7 @@ def run_single_ablation(
         train_mag_i=dataset_data["mag_i"][train_indices],
     )
 
-    metrics = eval_subsets(ablation, pred, dataset_data["mag_i"][train_indices], args, output_dir)
+    metrics = eval_subsets(ablation, pred, dataset_data, train_indices, args, output_dir)
     metrics.update({"ablation": ablation, "fold_id": args.fold_id, "epochs": args.epochs})
 
     metadata_path = os.path.join(output_dir, "dataset_metadata_marie_exact.npz")
@@ -558,6 +590,8 @@ if __name__ == "__main__":
     parser.add_argument("--mag_i_max", type=float, default=25.0)
     parser.add_argument("--mag_i_bins", type=int, default=14)
     parser.add_argument("--low_mag_support_quantile", type=float, default=0.20)
+    parser.add_argument("--low_photometric_support_fraction", type=float, default=0.20)
+    parser.add_argument("--photometric_support_k", type=int, default=10)
     parser.add_argument("--faint_mag_threshold", type=float, default=23.5)
     parser.add_argument("--smooth_distribution", action="store_true")
     parser.add_argument("--milestones", nargs="+", type=int, default=[35, 45])
