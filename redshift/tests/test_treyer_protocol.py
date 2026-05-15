@@ -10,7 +10,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 import numpy as np
 
 from analyze_marie_cv_folds import build_marie_cv_concat
-from analysis_utils import compute_marie_regular_cv_indices
+from analysis_utils import assert_split_integrity, compute_marie_regular_cv_indices, compute_marie_strict_cv_indices
 from analyze_treyer_figure7 import aggregate_treyer_bins, magnitude_support_rows
 from data_loader import field_label_from_filename, infer_field_labels, normalize_field_label
 
@@ -60,6 +60,20 @@ class TreyerProtocolTests(unittest.TestCase):
         self.assertEqual(split["test"].tolist(), split["val"].tolist())
         self.assertEqual(len(np.intersect1d(split["train"], split["test"])), 0)
         self.assertEqual(len(np.union1d(split["train"], split["test"])), 10)
+        assert_split_integrity(10, split, allow_val_test_overlap=True)
+        with self.assertRaises(ValueError):
+            assert_split_integrity(10, split)
+
+    def test_marie_strict_cv_split_separates_train_val_test(self):
+        split = compute_marie_strict_cv_indices(15, n_folds=5, fold_id=2, seed=42)
+        self.assertEqual(len(split["test"]), 3)
+        self.assertEqual(len(split["val"]), 3)
+        self.assertEqual(len(np.intersect1d(split["train"], split["val"])), 0)
+        self.assertEqual(len(np.intersect1d(split["train"], split["test"])), 0)
+        self.assertEqual(len(np.intersect1d(split["val"], split["test"])), 0)
+        self.assertEqual(len(np.concatenate([split["train"], split["val"], split["test"]])), 15)
+        self.assertEqual(len(np.unique(np.concatenate([split["train"], split["val"], split["test"]]))), 15)
+        assert_split_integrity(15, split)
 
     def _write_mini_marie_fold(self, base_dir, fold, offset=0):
         fold_dir = os.path.join(base_dir, str(fold))

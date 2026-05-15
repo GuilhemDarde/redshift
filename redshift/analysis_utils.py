@@ -94,6 +94,90 @@ def compute_marie_regular_cv_indices(
     return {"train": train_idx, "val": test_idx, "test": test_idx}
 
 
+def compute_marie_strict_cv_indices(
+    n_samples: int,
+    n_folds: int = CONFIG.N_FOLDS,
+    fold_id: int = 0,
+    seed: int = 42,
+) -> Dict[str, np.ndarray]:
+    """
+    Split Marie-like strict: shuffled folds, one test fold, one distinct val fold.
+
+    Use this for model selection and augmentation experiments. The historical
+    Marie reproduction split is kept in compute_marie_regular_cv_indices.
+    """
+    if n_samples <= 0:
+        raise ValueError("n_samples doit etre strictement positif.")
+    if n_folds < 3:
+        raise ValueError("n_folds doit etre >= 3 pour separer train/val/test.")
+    if fold_id < 0 or fold_id >= n_folds:
+        raise ValueError("fold_id doit etre dans [0, n_folds).")
+    indices = np.arange(n_samples, dtype=np.int64)
+    rng = np.random.RandomState(seed)
+    rng.shuffle(indices)
+    folds = np.array_split(indices, n_folds)
+    test_fold = fold_id
+    val_fold = (fold_id + 1) % n_folds
+    test_idx = np.asarray(folds[test_fold], dtype=np.int64)
+    val_idx = np.asarray(folds[val_fold], dtype=np.int64)
+    train_idx = np.concatenate([folds[i] for i in range(n_folds) if i not in {test_fold, val_fold}]).astype(np.int64)
+    return {"train": train_idx, "val": val_idx, "test": test_idx}
+
+
+def split_integrity_rows(n_samples: int, split_indices: Dict[str, np.ndarray]) -> List[Dict[str, object]]:
+    rows: List[Dict[str, object]] = []
+    for split_name in ["train", "val", "test"]:
+        idx = np.asarray(split_indices.get(split_name, np.array([], dtype=np.int64)), dtype=np.int64)
+        in_bounds = (idx >= 0) & (idx < n_samples)
+        rows.append({
+            "check": f"{split_name}_size",
+            "ok": True,
+            "value": int(idx.size),
+            "detail": "",
+        })
+        rows.append({
+            "check": f"{split_name}_duplicates",
+            "ok": bool(np.unique(idx).size == idx.size),
+            "value": int(idx.size - np.unique(idx).size),
+            "detail": "",
+        })
+        rows.append({
+            "check": f"{split_name}_out_of_bounds",
+            "ok": bool(np.all(in_bounds)),
+            "value": int(np.sum(~in_bounds)),
+            "detail": f"n_samples={n_samples}",
+        })
+
+    pairs = [("train", "val"), ("train", "test"), ("val", "test")]
+    for left, right in pairs:
+        left_idx = np.asarray(split_indices.get(left, np.array([], dtype=np.int64)), dtype=np.int64)
+        right_idx = np.asarray(split_indices.get(right, np.array([], dtype=np.int64)), dtype=np.int64)
+        overlap = np.intersect1d(left_idx, right_idx)
+        rows.append({
+            "check": f"{left}_{right}_overlap",
+            "ok": bool(overlap.size == 0),
+            "value": int(overlap.size),
+            "detail": "",
+        })
+    return rows
+
+
+def assert_split_integrity(
+    n_samples: int,
+    split_indices: Dict[str, np.ndarray],
+    allow_val_test_overlap: bool = False,
+) -> None:
+    rows = split_integrity_rows(n_samples, split_indices)
+    failures = []
+    for row in rows:
+        if allow_val_test_overlap and row["check"] == "val_test_overlap":
+            continue
+        if not row["ok"]:
+            failures.append(f"{row['check']}={row['value']}")
+    if failures:
+        raise ValueError("Split invalide ou fuite potentielle: " + ", ".join(failures))
+
+
 def split_labels(n_samples: int, split_indices: Dict[str, np.ndarray]) -> np.ndarray:
     labels = np.full(n_samples, "unassigned", dtype="<U10")
     for split_name, idx in split_indices.items():

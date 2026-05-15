@@ -551,7 +551,7 @@ if __name__ == "__main__":
     parser.add_argument("--n_folds", type=int, default=CONFIG.N_FOLDS)
     parser.add_argument("--fold_id", type=int, default=None)
     parser.add_argument("--cache_path", type=str, default=None)
-    parser.add_argument("--split_strategy", choices=["spatial", "marie_regular"], default="spatial")
+    parser.add_argument("--split_strategy", choices=["spatial", "marie_regular", "marie_strict"], default="spatial")
     parser.add_argument("--mode_filter", type=str, default=None)
     parser.add_argument("--max_metric_samples", type=int, default=8000)
     parser.add_argument("--max_examples", type=int, default=12)

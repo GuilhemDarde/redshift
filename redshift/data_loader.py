@@ -13,7 +13,9 @@ from torch.utils.data import DataLoader, Dataset, Subset
 
 from analysis_utils import (
     apply_region_mask,
+    assert_split_integrity,
     compute_marie_regular_cv_indices,
+    compute_marie_strict_cv_indices,
     compute_split_indices,
     save_metadata_csv,
     save_metadata_npz,
@@ -550,8 +552,23 @@ def get_dataset_and_splits(
             fold_id,
             n_folds or CONFIG.N_FOLDS,
         )
+    elif split_strategy == "marie_strict":
+        if fold_id is None:
+            raise ValueError("split_strategy=marie_strict requiert --fold_id.")
+        split_indices = compute_marie_strict_cv_indices(len(dataset), n_folds=n_folds or CONFIG.N_FOLDS, fold_id=fold_id, seed=42)
+        logger.info(
+            "Split strategy: Marie strict CV | fold=%s/%s | val fold=%s | seed=42",
+            fold_id,
+            n_folds or CONFIG.N_FOLDS,
+            (fold_id + 1) % (n_folds or CONFIG.N_FOLDS),
+        )
     else:
-        raise ValueError("split_strategy doit valoir spatial ou marie_regular.")
+        raise ValueError("split_strategy doit valoir spatial, marie_regular ou marie_strict.")
+    assert_split_integrity(
+        len(dataset),
+        split_indices,
+        allow_val_test_overlap=split_strategy == "marie_regular",
+    )
     return dataset, split_indices
 
 

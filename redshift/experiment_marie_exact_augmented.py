@@ -17,6 +17,7 @@ from analysis_utils import (
     magnitude_support_definition_rows,
     magnitude_support_mask,
     save_metadata_npz,
+    split_integrity_rows,
     split_labels,
     write_rows_csv,
 )
@@ -143,6 +144,7 @@ def load_synthetic_marie_dataset(
     mode_filter: Optional[str],
     seed: int,
     augment: bool,
+    require_source_index: bool = True,
 ) -> MarieArrayDataset:
     if path is None or not os.path.exists(path):
         raise FileNotFoundError(f"Dataset synthétique introuvable: {path}")
@@ -157,6 +159,11 @@ def load_synthetic_marie_dataset(
         train_lookup[np.asarray(train_indices, dtype=np.int64)] = True
         valid_source = (data["source_index"] >= 0) & (data["source_index"] < len(train_lookup))
         mask &= valid_source & train_lookup[data["source_index"].clip(0, len(train_lookup) - 1)]
+    elif require_source_index:
+        raise KeyError(
+            "Le dataset synthétique ne contient pas source_index. "
+            "Pour une évaluation stricte, les augmentations doivent être rattachées à des sources train."
+        )
     selected = np.where(mask)[0]
     if selected.size == 0:
         raise ValueError("Aucune augmentation synthétique compatible avec le fold courant.")
@@ -347,6 +354,7 @@ def build_train_dataset(
             mode_filter="i2i" if args.filter_synthetic_mode else None,
             seed=args.seed,
             augment=args.augment_synthetic,
+            require_source_index=not args.allow_synthetic_without_source_index,
         )
         return ConcatDataset([real_train, synthetic])
     raise ValueError(f"Ablation inconnue: {ablation}")
@@ -469,12 +477,13 @@ def run(args: argparse.Namespace) -> None:
         n_folds=args.n_folds,
         fold_id=args.fold_id,
         cache_path=args.cache_path,
-        split_strategy="marie_regular",
+        split_strategy=args.split_strategy,
     )
     metadata = build_metadata(dataset, split_indices=split_indices)
     metadata["split"] = split_labels(len(dataset), split_indices)
     metadata_path = os.path.join(output_dir, "dataset_metadata_marie_exact.npz")
     save_metadata_npz(metadata_path, metadata)
+    write_rows_csv(os.path.join(output_dir, "split_integrity_audit.csv"), split_integrity_rows(len(dataset), split_indices))
 
     train_indices = split_indices["train"]
     eval_indices = split_indices["test"]
@@ -529,6 +538,7 @@ if __name__ == "__main__":
     parser.add_argument("--filter_synthetic_mode", action="store_true")
     parser.add_argument("--max_synthetic", type=int, default=None)
     parser.add_argument("--augment_synthetic", action="store_true")
+    parser.add_argument("--allow_synthetic_without_source_index", action="store_true")
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--num_workers", type=int, default=0)
@@ -540,6 +550,7 @@ if __name__ == "__main__":
     parser.add_argument("--n_folds", type=int, default=5)
     parser.add_argument("--fold_id", type=int, default=0)
     parser.add_argument("--cache_path", type=str, default=None)
+    parser.add_argument("--split_strategy", choices=["spatial", "marie_regular", "marie_strict"], default="marie_strict")
     parser.add_argument("--n_bins", type=int, default=360)
     parser.add_argument("--z_min", type=float, default=0.0)
     parser.add_argument("--z_max", type=float, default=6.0)

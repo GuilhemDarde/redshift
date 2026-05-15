@@ -188,6 +188,7 @@ def run(args: argparse.Namespace) -> None:
         n_folds=args.n_folds if args.fold_id is not None else None,
         fold_id=args.fold_id,
         cache_path=args.cache_path,
+        split_strategy=args.split_strategy,
     )
     metadata = build_metadata(dataset, split_indices=split_indices)
     metadata_path = os.path.join(output_dir, "dataset_metadata_treyer.npz")
@@ -292,6 +293,7 @@ if __name__ == "__main__":
     parser.add_argument("--n_folds", type=int, default=CONFIG.N_FOLDS)
     parser.add_argument("--fold_id", type=int, default=0)
     parser.add_argument("--cache_path", type=str, default=None)
+    parser.add_argument("--split_strategy", choices=["spatial", "marie_regular", "marie_strict"], default="spatial")
     parser.add_argument("--limit_batches", type=int, default=None)
     parser.add_argument("--output_dir", type=str, default=None)
     parser.add_argument("--lr", type=float, default=3e-4)
