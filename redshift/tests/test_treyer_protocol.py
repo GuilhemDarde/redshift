@@ -10,6 +10,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 import numpy as np
 
 from analyze_marie_cv_folds import build_marie_cv_concat
+from analysis_utils import compute_marie_regular_cv_indices
 from analyze_treyer_figure7 import aggregate_treyer_bins, magnitude_support_rows
 from data_loader import field_label_from_filename, infer_field_labels, normalize_field_label
 
@@ -52,6 +53,13 @@ class TreyerProtocolTests(unittest.TestCase):
         by_name = {row["subset"]: row for row in rows}
         self.assertEqual(by_name["low_mag_support"]["n"], 1)
         self.assertEqual(by_name["normal_mag_support"]["n"], 1)
+
+    def test_marie_regular_cv_split_uses_one_fold_as_eval(self):
+        split = compute_marie_regular_cv_indices(10, n_folds=5, fold_id=2, seed=42)
+        self.assertEqual(len(split["test"]), 2)
+        self.assertEqual(split["test"].tolist(), split["val"].tolist())
+        self.assertEqual(len(np.intersect1d(split["train"], split["test"])), 0)
+        self.assertEqual(len(np.union1d(split["train"], split["test"])), 10)
 
     def _write_mini_marie_fold(self, base_dir, fold, offset=0):
         fold_dir = os.path.join(base_dir, str(fold))

@@ -11,7 +11,14 @@ from astropy.table import Table
 import astropy.units as u
 from torch.utils.data import DataLoader, Dataset, Subset
 
-from analysis_utils import apply_region_mask, compute_split_indices, save_metadata_csv, save_metadata_npz, split_labels
+from analysis_utils import (
+    apply_region_mask,
+    compute_marie_regular_cv_indices,
+    compute_split_indices,
+    save_metadata_csv,
+    save_metadata_npz,
+    split_labels,
+)
 from config import CONFIG
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -140,10 +147,10 @@ class CosmosDataset(Dataset):
 
         self.morpho_data = self._load_morpho_catalog()
         processed = self._load_and_process()
+        filtered = self._apply_dataset_filters(processed)
+        self.data = filtered
         if self.cache_path and max_files is None:
-            self.data = processed
             self._save_processed_cache(self.cache_path)
-        self.data = self._apply_dataset_filters(processed)
 
     def _load_processed_cache(self, cache_path: str) -> Dict[str, np.ndarray]:
         logger.info("Chargement du dataset pretraite depuis le cache : %s", cache_path)
@@ -163,6 +170,10 @@ class CosmosDataset(Dataset):
             raise KeyError(f"Cache dataset incomplet {cache_path}. Cles manquantes: {missing}")
         if "label_type" not in data:
             data["label_type"] = np.full(len(data["z_true"]), "spec", dtype="<U16")
+        if "ebv" not in data:
+            data["ebv"] = np.zeros(len(data["z_true"]), dtype=np.float32)
+        if "mags_marie" not in data:
+            data["mags_marie"] = np.asarray(data["mags"], dtype=np.float32)
         logger.info("Dataset charge depuis cache : %s objets. Conditionnement Dim=%s.", len(data["cond"]), data["cond"].shape[1])
         return data
 
@@ -267,6 +278,7 @@ class CosmosDataset(Dataset):
         logger.info(f"Traitement et Cross-Matching de {len(self.files)} fichiers...")
 
         all_x, all_cond_base, all_re, all_n, all_ra, all_dec, all_flags, all_mags = [], [], [], [], [], [], [], []
+        all_mags_marie, all_ebv = [], []
         all_field, all_label_type, all_source_file = [], [], []
         
         morpho_coords = self.morpho_data['coords']
@@ -345,6 +357,17 @@ class CosmosDataset(Dataset):
                         [info_matched[b] if b in names else np.full_like(mag_i, np.nan, dtype=np.float64) for b in CONFIG.BAND_NAMES],
                         axis=1,
                     )
+                    marie_band_names = ["us", "g", "r", "i", "z", "y"]
+                    mags_marie = np.stack(
+                        [
+                            info_matched["u"] if b == "us" and "us" not in names and "u" in names
+                            else info_matched[b] if b in names
+                            else np.full_like(mag_i, np.nan, dtype=np.float64)
+                            for b in marie_band_names
+                        ],
+                        axis=1,
+                    )
+                    ebv = info_matched["ebv"] if "ebv" in names else np.zeros_like(mag_i, dtype=np.float64)
 
                     c1 = g - r
                     c2 = r - mag_i
@@ -373,6 +396,8 @@ class CosmosDataset(Dataset):
                     all_dec.append(dec_matched[region_mask])
                     all_flags.append(flags_matched[region_mask])
                     all_mags.append(mags[region_mask])
+                    all_mags_marie.append(mags_marie[region_mask])
+                    all_ebv.append(ebv[region_mask])
                     all_field.append(field_matched[region_mask])
                     all_label_type.append(label_type_matched[region_mask])
                     all_source_file.append(source_file_matched[region_mask])
@@ -392,6 +417,8 @@ class CosmosDataset(Dataset):
         dec_concat = np.concatenate(all_dec, axis=0)
         flags_concat = np.concatenate(all_flags, axis=0)
         mags_concat = np.concatenate(all_mags, axis=0)
+        mags_marie_concat = np.concatenate(all_mags_marie, axis=0)
+        ebv_concat = np.concatenate(all_ebv, axis=0)
         field_concat = np.concatenate(all_field, axis=0)
         label_type_concat = np.concatenate(all_label_type, axis=0)
         source_file_concat = np.concatenate(all_source_file, axis=0)
@@ -420,6 +447,8 @@ class CosmosDataset(Dataset):
             'z_true': cond_base_concat[:, 0],
             'mag_i': cond_base_concat[:, 1] * 2.0 + 22.0,
             'mags': mags_concat,
+            'mags_marie': mags_marie_concat,
+            'ebv': ebv_concat,
             'flags': flags_concat,
             'field': field_concat,
             'label_type': label_type_concat,
@@ -460,6 +489,7 @@ def build_metadata(dataset: CosmosDataset, split_indices: Optional[Dict[str, np.
         "mag_i": dataset.data["mag_i"],
         "re_norm": dataset.data["re_norm"],
         "n_norm": dataset.data["n_norm"],
+        "ebv": dataset.data.get("ebv", np.zeros(len(dataset), dtype=np.float32)),
         "field": dataset.data.get("field", np.full(len(dataset), "unknown", dtype="<U32")),
         "label_type": dataset.data.get("label_type", np.full(len(dataset), "spec", dtype="<U16")),
     }
@@ -468,6 +498,9 @@ def build_metadata(dataset: CosmosDataset, split_indices: Optional[Dict[str, np.
     for idx, band in enumerate(CONFIG.BAND_NAMES):
         metadata[f"mag_{band}"] = mags[:, idx]
         metadata[f"flag_{band}"] = flags[:, idx]
+    if "mags_marie" in dataset.data:
+        for idx, band in enumerate(["us", "g", "r", "i", "z", "y"]):
+            metadata[f"mag_marie_{band}"] = dataset.data["mags_marie"][:, idx]
     if split_indices is not None:
         metadata["split"] = split_labels(len(dataset), split_indices)
     return metadata
@@ -494,6 +527,7 @@ def get_dataset_and_splits(
     n_folds: Optional[int] = None,
     fold_id: Optional[int] = None,
     cache_path: Optional[str] = None,
+    split_strategy: str = "spatial",
 ) -> Tuple[CosmosDataset, Dict[str, np.ndarray]]:
     dataset = CosmosDataset(
         CONFIG.DATA_PATH,
@@ -504,7 +538,20 @@ def get_dataset_and_splits(
         max_files=max_files,
         cache_path=cache_path,
     )
-    split_indices = compute_split_indices(dataset.data["ra"], n_folds=n_folds, fold_id=fold_id)
+    if split_strategy == "spatial":
+        split_indices = compute_split_indices(dataset.data["ra"], n_folds=n_folds, fold_id=fold_id)
+        logger.info("Split strategy: spatial RA")
+    elif split_strategy == "marie_regular":
+        if fold_id is None:
+            raise ValueError("split_strategy=marie_regular requiert --fold_id.")
+        split_indices = compute_marie_regular_cv_indices(len(dataset), n_folds=n_folds or CONFIG.N_FOLDS, fold_id=fold_id, seed=42)
+        logger.info(
+            "Split strategy: Marie regular CV | fold=%s/%s | seed=42",
+            fold_id,
+            n_folds or CONFIG.N_FOLDS,
+        )
+    else:
+        raise ValueError("split_strategy doit valoir spatial ou marie_regular.")
     return dataset, split_indices
 
 
@@ -518,9 +565,10 @@ def get_dataloaders(
     n_folds: Optional[int] = None,
     fold_id: Optional[int] = None,
     cache_path: Optional[str] = None,
+    split_strategy: str = "spatial",
 ) -> Tuple[DataLoader, DataLoader, DataLoader]:
     '''
-    actions : Construit les DataLoaders en appliquant un partitionnement spatial strict sur les données cross-matchées.
+    actions : Construit les DataLoaders en appliquant le partitionnement demande.
     inputs : Aucun
     appels : CosmosDataset, np.argsort, Subset, DataLoader
     outputs : Tuple contenant les DataLoaders de Train, Val et Test (Tuple[DataLoader, DataLoader, DataLoader])
@@ -533,12 +581,19 @@ def get_dataloaders(
         n_folds=n_folds,
         fold_id=fold_id,
         cache_path=cache_path,
+        split_strategy=split_strategy,
     )
     train_idx = split_indices["train"]
     val_idx = split_indices["val"]
     test_idx = split_indices["test"]
 
-    logger.info(f"Split Spatial RA : Train={len(train_idx)}, Val={len(val_idx)}, Test={len(test_idx)}")
+    logger.info(
+        "Split %s : Train=%s, Val=%s, Test=%s",
+        split_strategy,
+        len(train_idx),
+        len(val_idx),
+        len(test_idx),
+    )
 
     train_ds = Subset(full_ds, train_idx)
     val_ds = Subset(full_ds, val_idx)

@@ -122,6 +122,7 @@ def train(args: argparse.Namespace) -> None:
         n_folds=args.n_folds if args.fold_id is not None else None,
         fold_id=args.fold_id,
         cache_path=args.cache_path,
+        split_strategy=args.split_strategy,
     )
     
     base_cfm = ConditionalFlowMatching(num_timesteps=CONFIG.TIMESTEPS)
@@ -161,6 +162,7 @@ if __name__ == "__main__":
     parser.add_argument("--n_folds", type=int, default=CONFIG.N_FOLDS)
     parser.add_argument("--fold_id", type=int, default=None)
     parser.add_argument("--cache_path", type=str, default=None)
+    parser.add_argument("--split_strategy", choices=["spatial", "marie_regular"], default="spatial")
     parser.add_argument("--output_checkpoint", type=str, default=None)
     parser.add_argument("--data_parallel", action="store_true")
     train(parser.parse_args())

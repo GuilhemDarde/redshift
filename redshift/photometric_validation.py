@@ -403,6 +403,10 @@ def select_reference_indices(metadata: Dict[str, np.ndarray], split_indices: Dic
     context: Dict[str, np.ndarray] = {}
     if args.selection_target == "all_train":
         return train_indices, "Real train reference", context
+    if args.selection_target == "faint_mag":
+        faint = metadata["mag_i"] >= args.faint_mag_threshold
+        context["faint_mag_threshold"] = np.array(args.faint_mag_threshold)
+        return train_indices[faint[train_indices]], f"Real train mag_i >= {args.faint_mag_threshold:.2f}", context
     if args.selection_target == "low_density":
         density, _ = compute_train_knn_density(metadata["ra"], metadata["dec"], train_indices, k=args.knn_k)
         low_mask_all, threshold = low_density_mask(density, train_indices, quantile=args.low_density_quantile)
@@ -438,6 +442,7 @@ def validate_candidates(args: argparse.Namespace) -> None:
         n_folds=args.n_folds if args.fold_id is not None else None,
         fold_id=args.fold_id,
         cache_path=args.cache_path,
+        split_strategy=args.split_strategy,
     )
     metadata = build_metadata(dataset, split_indices=split_indices)
     ref_indices, reference_label, reference_context = select_reference_indices(metadata, split_indices, args)
@@ -549,7 +554,9 @@ if __name__ == "__main__":
     parser.add_argument("--n_folds", type=int, default=CONFIG.N_FOLDS)
     parser.add_argument("--fold_id", type=int, default=None)
     parser.add_argument("--cache_path", type=str, default=None)
-    parser.add_argument("--selection_target", choices=["low_mag_support", "all_train", "low_density"], default="low_mag_support")
+    parser.add_argument("--split_strategy", choices=["spatial", "marie_regular"], default="spatial")
+    parser.add_argument("--selection_target", choices=["low_mag_support", "faint_mag", "all_train", "low_density"], default="low_mag_support")
+    parser.add_argument("--faint_mag_threshold", type=float, default=23.5)
     parser.add_argument("--mag_i_min", type=float, default=CONFIG.I_MIN)
     parser.add_argument("--mag_i_max", type=float, default=CONFIG.I_MAX)
     parser.add_argument("--mag_i_bins", type=int, default=14)

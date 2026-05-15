@@ -13,6 +13,7 @@ from model import (
     PhysicsInformedLoss,
     get_timestep_embedding,
 )
+from marie_treyer_exact import build_marie_treyer_model, marie_point_estimate, marie_z_centers, marie_z_edges
 
 
 class SpyPhysicsLoss(nn.Module):
@@ -90,6 +91,20 @@ class ModelSmokeTests(unittest.TestCase):
 
         self.assertEqual(augmented.shape, x.shape)
         self.assertTrue(torch.isfinite(augmented).all())
+
+    def test_marie_treyer_exact_forward_shape(self):
+        model = build_marie_treyer_model(n_bins=12, mags_input_size=6)
+        x = torch.randn(1, 6, 64, 64)
+        ebv = torch.zeros(1)
+        mags = torch.randn(1, 6)
+        logits, z_reg = model(x, ebv, mags=mags)
+        centers = torch.tensor(marie_z_centers(marie_z_edges(12)), dtype=torch.float32)
+        z_pred = marie_point_estimate(logits, centers)
+
+        self.assertEqual(logits.shape, (1, 12))
+        self.assertEqual(z_reg.shape, (1, 1))
+        self.assertEqual(z_pred.shape, (1,))
+        self.assertTrue(torch.isfinite(z_pred).all())
 
 
 if __name__ == "__main__":

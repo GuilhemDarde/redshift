@@ -67,6 +67,33 @@ def compute_split_indices(
     }
 
 
+def compute_marie_regular_cv_indices(
+    n_samples: int,
+    n_folds: int = CONFIG.N_FOLDS,
+    fold_id: int = 0,
+    seed: int = 42,
+) -> Dict[str, np.ndarray]:
+    """
+    Reproduit le split cross-validation regulier vu dans le code Marie.
+
+    Marie melange les indices valides avec seed=42, les coupe en 5 blocs, puis
+    utilise un bloc comme validation/test et tous les autres comme train.
+    """
+    if n_samples <= 0:
+        raise ValueError("n_samples doit etre strictement positif.")
+    if n_folds < 2:
+        raise ValueError("n_folds doit etre >= 2 pour le split Marie.")
+    if fold_id < 0 or fold_id >= n_folds:
+        raise ValueError("fold_id doit etre dans [0, n_folds).")
+    indices = np.arange(n_samples, dtype=np.int64)
+    rng = np.random.RandomState(seed)
+    rng.shuffle(indices)
+    folds = np.array_split(indices, n_folds)
+    test_idx = np.asarray(folds[fold_id], dtype=np.int64)
+    train_idx = np.concatenate([folds[i] for i in range(n_folds) if i != fold_id]).astype(np.int64)
+    return {"train": train_idx, "val": test_idx, "test": test_idx}
+
+
 def split_labels(n_samples: int, split_indices: Dict[str, np.ndarray]) -> np.ndarray:
     labels = np.full(n_samples, "unassigned", dtype="<U10")
     for split_name, idx in split_indices.items():
