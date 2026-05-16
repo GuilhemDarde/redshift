@@ -10,9 +10,10 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from analysis_utils import ensure_dir, write_rows_csv
+from cfm_conditioning import photometric_features_from_cfm_condition
 from config import CONFIG
 from data_loader import get_dataset_and_splits
-from photometric_validation import denormalize_images, negative_flux_fraction
+from photometric_validation import candidate_condition_schema, denormalize_images, negative_flux_fraction
 from utils import set_global_seed
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -230,6 +231,7 @@ def _metric_rows(
     strengths: Optional[np.ndarray],
     metrics: Dict[str, np.ndarray],
     neg_aug: np.ndarray,
+    mag_i_values: Optional[np.ndarray] = None,
 ) -> List[Dict[str, float]]:
     rows: List[Dict[str, float]] = []
     band_names = CONFIG.BAND_NAMES[: metrics["source_flux"].shape[1]]
@@ -240,7 +242,7 @@ def _metric_rows(
             "mode": str(modes[pos]) if modes is not None else "",
             "strength": float(strengths[pos]) if strengths is not None else float("nan"),
             "z": float(cond[pos, 0]) if cond.shape[1] > 0 else float("nan"),
-            "mag_i": float(cond[pos, 1] * 2.0 + 22.0) if cond.shape[1] > 1 else float("nan"),
+            "mag_i": float(mag_i_values[pos]) if mag_i_values is not None else float(cond[pos, 1] * 2.0 + 22.0) if cond.shape[1] > 1 else float("nan"),
             "negative_flux_fraction_aug": float(neg_aug[pos]),
             "median_relative_l1": float(np.nanmedian(metrics["relative_l1"][pos])),
             "median_flux_ratio": float(np.nanmedian(metrics["flux_ratio"][pos])),
@@ -436,6 +438,7 @@ def run(args: argparse.Namespace) -> None:
     candidates = np.load(args.augmentations, allow_pickle=False)
     x = candidates["x"]
     cond = candidates["cond"]
+    condition_schema = candidate_condition_schema(candidates)
     source_index = candidates["source_index"] if "source_index" in candidates.files else np.full(len(x), -1, dtype=np.int64)
     modes = candidates["mode"] if "mode" in candidates.files else None
     strengths = candidates["strength"] if "strength" in candidates.files else None
@@ -469,7 +472,17 @@ def run(args: argparse.Namespace) -> None:
     neg_aug = negative_flux_fraction(aug_images)
     metric_modes = modes[metric_indices] if modes is not None else None
     metric_strengths = strengths[metric_indices] if strengths is not None else None
-    rows = _metric_rows(metric_indices, source_index[metric_indices], cond[metric_indices], metric_modes, metric_strengths, metrics, neg_aug)
+    mag_i_values = photometric_features_from_cfm_condition(cond[metric_indices], schema=condition_schema)["mag_i"]
+    rows = _metric_rows(
+        metric_indices,
+        source_index[metric_indices],
+        cond[metric_indices],
+        metric_modes,
+        metric_strengths,
+        metrics,
+        neg_aug,
+        mag_i_values=mag_i_values,
+    )
     write_rows_csv(os.path.join(output_dir, "visual_band_metrics.csv"), rows)
 
     summary = _summary_rows(rows)

@@ -1,4 +1,5 @@
 import argparse
+import json
 import logging
 import os
 from typing import List, Tuple
@@ -9,6 +10,7 @@ import torch.nn as nn
 from tqdm import tqdm
 
 from analysis_utils import magnitude_bin_edges, magnitude_support_definition_rows, magnitude_support_mask, write_rows_csv
+from cfm_conditioning import build_cfm_condition, condition_choices, condition_dim
 from config import CONFIG
 from data_loader import build_metadata, get_dataset_and_splits
 from density_utils import compute_train_knn_density, low_density_mask, low_support_by_radius_mask, standardized_knn_radius
@@ -71,13 +73,28 @@ class CFMGenerationWrapper(nn.Module):
         raise ValueError(f"Mode de génération inconnu: {mode}")
 
 
-def load_cfm(checkpoint: str, device: torch.device) -> ConditionalFlowMatching:
-    model = ConditionalFlowMatching(num_timesteps=CONFIG.TIMESTEPS).to(device)
+def load_cfm(checkpoint: str, device: torch.device, cfm_condition_dim: int) -> ConditionalFlowMatching:
+    model = ConditionalFlowMatching(num_timesteps=CONFIG.TIMESTEPS, condition_dim=cfm_condition_dim).to(device)
     if not os.path.exists(checkpoint):
         raise FileNotFoundError(f"Checkpoint CFM introuvable: {checkpoint}")
     model.load_state_dict(torch.load(checkpoint, map_location=device))
     model.eval()
     return model
+
+
+def resolve_condition_schema(checkpoint: str, requested_schema: str) -> str:
+    if requested_schema != "auto":
+        return requested_schema
+    metadata_path = checkpoint + ".json"
+    if os.path.exists(metadata_path):
+        with open(metadata_path, "r") as f:
+            metadata = json.load(f)
+        schema = metadata.get("condition_schema", "legacy7")
+        if schema in condition_choices():
+            logger.info("Conditionnement CFM lu depuis %s: %s", metadata_path, schema)
+            return schema
+        logger.warning("Conditionnement CFM invalide dans %s: %s. Repli legacy7.", metadata_path, schema)
+    return "legacy7"
 
 
 def build_generator(model: ConditionalFlowMatching, enabled: bool) -> nn.Module:
@@ -100,7 +117,7 @@ def sample_indices(indices: np.ndarray, limit: int, seed: int) -> np.ndarray:
 
 def choose_partner_indices(cond: np.ndarray, source_indices: np.ndarray, candidate_indices: np.ndarray) -> np.ndarray:
     '''
-    actions : Associe à chaque source un voisin proche dans l'espace conditionnel 7D.
+    actions : Associe à chaque source un voisin proche dans l'espace conditionnel CFM.
     inputs : cond (np.ndarray), source_indices (np.ndarray), candidate_indices (np.ndarray)
     appels : cKDTree, np.argsort
     outputs : np.ndarray
@@ -368,6 +385,8 @@ def generate_for_indices(
 def run(args: argparse.Namespace) -> None:
     set_global_seed(args.seed)
     device = torch.device(CONFIG.DEVICE)
+    checkpoint = args.checkpoint or CONFIG.exp_path(CONFIG.CFM_CHECKPOINT)
+    resolved_schema = resolve_condition_schema(checkpoint, args.condition_schema)
     dataset, split_indices = get_dataset_and_splits(
         region=args.region,
         field=args.field,
@@ -378,6 +397,7 @@ def run(args: argparse.Namespace) -> None:
         cache_path=args.cache_path,
         split_strategy=args.split_strategy,
     )
+    dataset_cond = build_cfm_condition(dataset.data, schema=resolved_schema)
     metadata = build_metadata(dataset, split_indices=split_indices)
     selected_pool, target_context = select_source_pool(metadata, split_indices, args)
 
@@ -387,7 +407,7 @@ def run(args: argparse.Namespace) -> None:
         raise RuntimeError("Aucune source sélectionnée pour la génération.")
 
     expanded_sources = repeated_sources(selected, args.n_aug_per_source)
-    partner_for_selected = choose_partner_indices(dataset.data["cond"], selected, selected)
+    partner_for_selected = choose_partner_indices(dataset_cond, selected, selected)
     partner_lookup = {int(src): int(partner) for src, partner in zip(selected, partner_for_selected)}
     expanded_partners = np.asarray([partner_lookup[int(src)] for src in expanded_sources], dtype=np.int64)
 
@@ -397,13 +417,14 @@ def run(args: argparse.Namespace) -> None:
         len(expanded_sources),
         target_context["target_description"],
     )
-    model = load_cfm(args.checkpoint or CONFIG.exp_path(CONFIG.CFM_CHECKPOINT), device)
+    logger.info("Conditionnement génération CFM: %s Dim=%s", resolved_schema, dataset_cond.shape[1])
+    model = load_cfm(checkpoint, device, condition_dim(resolved_schema))
     generator = build_generator(model, args.data_parallel)
     generator.eval()
     x, cond, source_idx, partner_idx, source_density, mode, strength = generate_for_indices(
         generator,
         dataset.data["x"],
-        dataset.data["cond"],
+        dataset_cond,
         target_context["density"],
         expanded_sources,
         expanded_partners,
@@ -434,6 +455,7 @@ def run(args: argparse.Namespace) -> None:
         photometric_support_radius=target_context["photometric_support_radius"][source_idx],
         low_photometric_support_threshold=np.array(target_context["low_photometric_support_threshold"], dtype=np.float64),
         low_photometric_support_fraction=np.array(args.low_photometric_support_fraction, dtype=np.float64),
+        condition_schema=np.array(resolved_schema),
     )
     write_rows_csv(
         os.path.splitext(output)[0] + "_mag_support_definition.csv",
@@ -451,6 +473,7 @@ if __name__ == "__main__":
     parser.add_argument("--mode", choices=["global", "targeted_global", "i2i", "interp", "both"], default="i2i")
     parser.add_argument("--checkpoint", type=str, default=None)
     parser.add_argument("--output", type=str, default=None)
+    parser.add_argument("--condition_schema", choices=("auto",) + condition_choices(), default="auto")
     parser.add_argument("--region", choices=["all", "stripe82"], default="all")
     parser.add_argument("--field", type=str, default="all")
     parser.add_argument("--sample_filter", choices=["all", "spec"], default="spec")

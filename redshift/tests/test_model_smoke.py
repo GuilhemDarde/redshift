@@ -52,6 +52,26 @@ class ModelSmokeTests(unittest.TestCase):
         self.assertTrue(torch.isfinite(loss))
         self.assertTrue(torch.isfinite(x1_pred).all())
 
+    def test_cfm_marie_condition_and_multiband_loss_smoke(self):
+        model = ConditionalFlowMatching(condition_dim=10)
+        wrapper = OT_CFM_Physics_Wrapper(
+            model,
+            lambda_photo=0.1,
+            lambda_color=0.01,
+            mag_zp=torch.full((6,), 25.0),
+        )
+        x = torch.randn(2, 6, 64, 64)
+        cond = torch.zeros(2, 10)
+        cond[:, 0] = torch.tensor([0.3, 0.8])
+        target_mags = torch.full((2, 6), 22.0)
+
+        loss, metrics = wrapper(x, cond, target_mags=target_mags)
+
+        self.assertEqual(loss.ndim, 0)
+        self.assertTrue(torch.isfinite(loss))
+        self.assertIn("loss_photo", metrics)
+        self.assertIn("loss_color", metrics)
+
     def test_physics_wrapper_uses_predicted_endpoint_not_target(self):
         base = ConditionalFlowMatching()
         wrapper = OT_CFM_Physics_Wrapper(base, lambda_photo=0.1)

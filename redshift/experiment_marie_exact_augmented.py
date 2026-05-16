@@ -174,15 +174,17 @@ def load_synthetic_marie_dataset(
 
     x = data["x"][selected].astype(np.float32)
     cond = data["cond"][selected].astype(np.float32)
-    z_true = cond[:, 0]
-    mag_i = cond[:, 1] * 2.0 + 22.0
     ebv = np.zeros(len(selected), dtype=np.float32)
     if "source_index" in data.files:
         source_idx = data["source_index"][selected].astype(np.int64)
+        z_true = np.asarray(real_data["z_true"], dtype=np.float32)[source_idx]
+        mag_i = np.asarray(real_data["mag_i"], dtype=np.float32)[source_idx]
         mags = _mags_for_marie(real_data)[source_idx]
         if "ebv" in real_data:
             ebv = np.asarray(real_data["ebv"], dtype=np.float32)[source_idx]
     else:
+        z_true = cond[:, 0]
+        mag_i = cond[:, 1] * 2.0 + 22.0
         mags = _synthetic_mags_from_cond(cond)
     return MarieArrayDataset(
         x=x,

@@ -14,6 +14,7 @@ from analysis_utils import (
     magnitude_support_mask,
     write_rows_csv,
 )
+from cfm_conditioning import photometric_features_from_cfm_condition
 from config import CONFIG
 from data_loader import build_metadata, get_dataset_and_splits
 from density_utils import compute_train_knn_density, low_density_mask, low_support_by_radius_mask, standardized_knn_radius
@@ -118,17 +119,36 @@ def photometric_features_from_magnitudes(mags: np.ndarray) -> Dict[str, np.ndarr
 
 def photometric_features_from_conditions(cond: np.ndarray) -> Dict[str, np.ndarray]:
     '''
-    actions : Récupère les cibles photométriques depuis le vecteur conditionnel 7D.
+    actions : Récupère les cibles photométriques depuis le vecteur conditionnel legacy7.
     inputs : cond (np.ndarray)
     appels : dict
     outputs : Dict[str, np.ndarray]
     '''
-    return {
-        "mag_i": cond[:, 1] * 2.0 + 22.0,
-        "g_r": cond[:, 2],
-        "r_i": cond[:, 3],
-        "i_z": cond[:, 4],
-    }
+    return photometric_features_from_cfm_condition(cond, schema="legacy7")
+
+
+def photometric_features_from_source_metadata(metadata: Dict[str, np.ndarray], source_index: np.ndarray) -> Dict[str, np.ndarray]:
+    source_index = np.asarray(source_index, dtype=np.int64)
+    n = len(source_index)
+    features = {key: np.full(n, np.nan, dtype=np.float64) for key in PHOTO_KEYS}
+    valid = (source_index >= 0) & (source_index < len(metadata["mag_i"]))
+    if not np.any(valid):
+        return features
+    valid_indices = source_index[valid]
+    mags = catalog_magnitudes_from_metadata(metadata, valid_indices)
+    source_features = photometric_features_from_magnitudes(mags)
+    for key in PHOTO_KEYS:
+        features[key][valid] = source_features[key]
+    return features
+
+
+def candidate_condition_schema(candidates: np.lib.npyio.NpzFile) -> str:
+    if "condition_schema" not in candidates.files:
+        return "legacy7"
+    value = np.asarray(candidates["condition_schema"])
+    if value.shape == ():
+        return str(value.item())
+    return str(value.ravel()[0])
 
 
 def photometric_support_matrix(metadata: Dict[str, np.ndarray]) -> np.ndarray:
@@ -499,10 +519,18 @@ def validate_candidates(args: argparse.Namespace) -> None:
     x = candidates["x"]
     cond = candidates["cond"]
     source_index = candidates["source_index"] if "source_index" in candidates.files else np.full(len(x), -1, dtype=np.int64)
+    condition_schema = candidate_condition_schema(candidates)
 
     cand_mags, cand_fluxes = image_magnitudes(x, zero_points)
     cand_features = photometric_features_from_magnitudes(cand_mags)
-    target_features = photometric_features_from_conditions(cond)
+    target_features = photometric_features_from_cfm_condition(cond, schema=condition_schema)
+    if condition_schema != "legacy7" and np.any(source_index >= 0):
+        source_target_features = photometric_features_from_source_metadata(metadata, source_index)
+        source_valid = feature_limits_mask(source_target_features)
+        for key in PHOTO_KEYS:
+            values = np.asarray(target_features[key], dtype=np.float64).copy()
+            values[source_valid] = source_target_features[key][source_valid]
+            target_features[key] = values
     cand_residuals = residuals_from_features(cand_features, target_features)
     accepted_mask = acceptance_mask(
         cand_residuals,

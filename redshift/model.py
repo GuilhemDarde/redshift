@@ -1,5 +1,5 @@
 import math
-from typing import Dict, Tuple, Union
+from typing import Dict, Sequence, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -122,14 +122,15 @@ class ConditionalDenoiser(nn.Module):
 class ConditionalFlowMatching(nn.Module):
     '''
     actions : Implémente la logique d'adaptation de domaine par trajectoires de flux continus (OT-CFM).
-    inputs : num_timesteps (int)
+    inputs : num_timesteps (int), condition_dim (int)
     appels : super, ConditionEncoder, ConditionalDenoiser, torch.rand, torch.randn_like, get_timestep_embedding, F.mse_loss
     outputs : Instance de ConditionalFlowMatching
     '''
-    def __init__(self, num_timesteps: int = 100) -> None:
+    def __init__(self, num_timesteps: int = 100, condition_dim: int = 7) -> None:
         super().__init__()
         self.num_timesteps = num_timesteps
-        self.condition_encoder = ConditionEncoder(input_dim=7, output_dim=256)
+        self.condition_dim = condition_dim
+        self.condition_encoder = ConditionEncoder(input_dim=condition_dim, output_dim=256)
         self.denoiser = ConditionalDenoiser(in_channels=6, cond_emb_dim=256)
         self.sigma_min = 1e-4
 
@@ -275,60 +276,135 @@ class PhysicsInformedLoss(nn.Module):
     appels : super
     outputs : Instance de PhysicsInformedLoss
     '''
-    def __init__(self, asinh_norm: bool = True, mag_zp: float = 23.563542) -> None:
+    def __init__(
+        self,
+        asinh_norm: bool = True,
+        mag_zp: Union[float, Sequence[float], torch.Tensor] = 23.563542,
+        flux_mode: str = "signed",
+    ) -> None:
         super().__init__()
         self.asinh_norm = asinh_norm
-        self.mag_zp = mag_zp
+        if flux_mode not in {"positive", "signed"}:
+            raise ValueError("flux_mode doit valoir positive ou signed.")
+        self.flux_mode = flux_mode
+        self.register_buffer("mag_zp", torch.as_tensor(mag_zp, dtype=torch.float32))
         self.i_band_idx = 3
+        self.color_pairs = ((1, 2), (2, 3), (3, 4), (4, 5))
 
-    def forward(self, x_pred: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
+    def _image_magnitudes(self, x_pred: torch.Tensor) -> torch.Tensor:
         '''
-        actions : Intègre le flux spatial de l'image, convertit la somme en magnitude apparente et pénalise l'écart via une perte de Huber robuste.
-        inputs : x_pred (torch.Tensor), cond (torch.Tensor)
-        appels : torch.clamp, torch.sinh, torch.sum, torch.log10, F.huber_loss
+        actions : Intègre le flux spatial par bande et le convertit en magnitude apparente.
+        inputs : x_pred (torch.Tensor)
+        appels : torch.clamp, torch.sinh, torch.sum, torch.log10
         outputs : torch.Tensor
         '''
-        mag_i_target = cond[:, 1] * 2.0 + 22.0
-        
         x_clipped = torch.clamp(x_pred, min=-10.0, max=10.0)
         img_linear = torch.sinh(x_clipped) if self.asinh_norm else x_clipped
-        
-        flux_pred = torch.sum(img_linear[:, self.i_band_idx, :, :], dim=(1, 2))
+        if self.flux_mode == "positive":
+            img_linear = torch.clamp(img_linear, min=0.0)
+
+        flux_pred = torch.sum(img_linear, dim=(2, 3))
         flux_pred = torch.clamp(flux_pred, min=1e-8)
-        
-        mag_pred = self.mag_zp - 2.5 * torch.log10(flux_pred)
-        
-        return F.huber_loss(mag_pred, mag_i_target, delta=1.0)
+        mag_zp = self.mag_zp.to(x_pred.device)
+        if mag_zp.ndim == 0:
+            mag_zp = mag_zp.expand(flux_pred.shape[1])
+        return mag_zp[None, :] - 2.5 * torch.log10(flux_pred)
+
+    def _finite_huber(self, pred: torch.Tensor, target: torch.Tensor, delta: float = 1.0) -> torch.Tensor:
+        mask = torch.isfinite(pred) & torch.isfinite(target)
+        if not torch.any(mask):
+            return pred.sum() * 0.0
+        return F.huber_loss(pred[mask], target[mask], delta=delta)
+
+    def color_loss(self, x_pred: torch.Tensor, target_mags: torch.Tensor) -> torch.Tensor:
+        '''
+        actions : Pénalise les couleurs g-r, r-i, i-z et z-y quand les six magnitudes cibles sont disponibles.
+        inputs : x_pred (torch.Tensor), target_mags (torch.Tensor)
+        appels : self._image_magnitudes, self._finite_huber
+        outputs : torch.Tensor
+        '''
+        mag_pred = self._image_magnitudes(x_pred)
+        target_mags = target_mags.to(x_pred.device)
+        losses = []
+        for left, right in self.color_pairs:
+            pred_color = mag_pred[:, left] - mag_pred[:, right]
+            target_color = target_mags[:, left] - target_mags[:, right]
+            losses.append(self._finite_huber(pred_color, target_color, delta=0.5))
+        return torch.stack(losses).mean() if losses else mag_pred.sum() * 0.0
+
+    def forward(
+        self,
+        x_pred: torch.Tensor,
+        cond: torch.Tensor,
+        target_mags: torch.Tensor = None,
+    ) -> torch.Tensor:
+        '''
+        actions : Intègre le flux spatial, convertit en magnitudes et pénalise l'écart via une perte de Huber robuste.
+        inputs : x_pred (torch.Tensor), cond (torch.Tensor), target_mags (torch.Tensor optionnel)
+        appels : self._image_magnitudes, self._finite_huber
+        outputs : torch.Tensor
+        '''
+        mag_pred = self._image_magnitudes(x_pred)
+
+        if target_mags is None:
+            mag_i_target = cond[:, 1] * 2.0 + 22.0
+            return self._finite_huber(mag_pred[:, self.i_band_idx], mag_i_target, delta=1.0)
+
+        target_mags = target_mags.to(x_pred.device)
+        if target_mags.ndim != 2 or target_mags.shape[1] != mag_pred.shape[1]:
+            raise ValueError("target_mags doit avoir la forme (batch, 6).")
+        return self._finite_huber(mag_pred, target_mags, delta=1.0)
 
 class OT_CFM_Physics_Wrapper(nn.Module):
     '''
     actions : Encapsule le modèle génératif OT-CFM pour y intégrer la perte composite équilibrée.
-    inputs : base_cfm (nn.Module), lambda_photo (float)
+    inputs : base_cfm (nn.Module), lambda_photo (float), lambda_color (float)
     appels : super, PhysicsInformedLoss
     outputs : Instance de OT_CFM_Physics_Wrapper
     '''
-    def __init__(self, base_cfm: nn.Module, lambda_photo: float = 0.01) -> None:
+    def __init__(
+        self,
+        base_cfm: nn.Module,
+        lambda_photo: float = 0.01,
+        lambda_color: float = 0.0,
+        mag_zp: Union[float, Sequence[float], torch.Tensor] = CONFIG.MAG_MEAN,
+        flux_mode: str = "signed",
+    ) -> None:
         super().__init__()
         self.base_cfm = base_cfm
         self.lambda_photo = lambda_photo
-        self.photo_loss_fn = PhysicsInformedLoss(asinh_norm=CONFIG.ASINH_NORM, mag_zp=CONFIG.MAG_MEAN)
+        self.lambda_color = lambda_color
+        self.photo_loss_fn = PhysicsInformedLoss(asinh_norm=CONFIG.ASINH_NORM, mag_zp=mag_zp, flux_mode=flux_mode)
 
-    def forward(self, x_1: torch.Tensor, cond_vector: torch.Tensor) -> Tuple[torch.Tensor, Dict[str, float]]:
+    def forward(
+        self,
+        x_1: torch.Tensor,
+        cond_vector: torch.Tensor,
+        target_mags: torch.Tensor = None,
+    ) -> Tuple[torch.Tensor, Dict[str, float]]:
         '''
-        actions : Calcule la perte totale combinant le flot temporel classique et la contrainte de magnitude sur l'image finale estimee par le champ.
-        inputs : x_1 (torch.Tensor), cond_vector (torch.Tensor)
+        actions : Calcule la perte totale combinant le flot temporel classique et les contraintes photométriques sur l'image finale estimée.
+        inputs : x_1 (torch.Tensor), cond_vector (torch.Tensor), target_mags (torch.Tensor optionnel)
         appels : self.base_cfm, self.photo_loss_fn
         outputs : Tuple[torch.Tensor, Dict[str, float]]
         '''
         loss_vf, x1_pred = self.base_cfm(x_1, cond_vector, return_x1_pred=True)
-        loss_photo = self.photo_loss_fn(x1_pred, cond_vector)
-        
+        if target_mags is None:
+            loss_photo = self.photo_loss_fn(x1_pred, cond_vector)
+        else:
+            loss_photo = self.photo_loss_fn(x1_pred, cond_vector, target_mags=target_mags)
+
         loss_total = loss_vf + self.lambda_photo * loss_photo
-        
         metrics = {
             "loss_total": loss_total.detach(),
             "loss_vf": loss_vf.detach(),
             "loss_photo": loss_photo.detach()
         }
+
+        if target_mags is not None and self.lambda_color > 0.0:
+            loss_color = self.photo_loss_fn.color_loss(x1_pred, target_mags)
+            loss_total = loss_total + self.lambda_color * loss_color
+            metrics["loss_total"] = loss_total.detach()
+            metrics["loss_color"] = loss_color.detach()
         
         return loss_total, metrics
