@@ -15,7 +15,7 @@ from data_loader import get_dataset_and_splits
 from photometric_validation import denormalize_images
 from renormalize_i2i_flux import linear_to_model_space
 from utils import set_global_seed
-from visual_band_inspection import _rgb_preview, bandwise_visual_metrics, select_visual_indices
+from visual_band_inspection import _finite_quantile, _rgb_preview, bandwise_visual_metrics, select_visual_indices
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -123,17 +123,73 @@ def _reconstruct_raw_i2i_from_final_blend(source_x: np.ndarray, final: np.lib.np
 
 def _select_final_rows(
     source_images: np.ndarray,
+    raw_images: np.ndarray,
     final_images: np.ndarray,
     max_examples: int,
     seed: int,
     selection: str,
+    selection_metric: str,
 ) -> np.ndarray:
     candidate_indices = np.arange(len(final_images), dtype=np.int64)
     if len(candidate_indices) <= max_examples:
         return candidate_indices
-    metrics = bandwise_visual_metrics(source_images, final_images)
+
+    if selection_metric == "raw_change":
+        comparison_images = raw_images
+    elif selection_metric == "final_change":
+        comparison_images = final_images
+    elif selection_metric == "fusion_effect":
+        comparison_images = final_images
+        source_images = raw_images
+    else:
+        raise ValueError("--selection_metric doit valoir raw_change, final_change ou fusion_effect.")
+
+    metrics = bandwise_visual_metrics(source_images, comparison_images)
     median_l1 = np.nanmedian(metrics["relative_l1"], axis=1)
     return select_visual_indices(candidate_indices, median_l1, max_examples, seed, strategy=selection)
+
+
+def _rgb_preview_fixed_hi(linear: np.ndarray, hi: float) -> np.ndarray:
+    channels = [3, 2, 1] if linear.shape[0] >= 4 else list(range(min(3, linear.shape[0])))[::-1]
+    rgb = np.stack([np.clip(linear[idx], 0.0, None) for idx in channels], axis=-1)
+    if hi <= 0.0 or not np.isfinite(hi):
+        return np.zeros_like(rgb)
+    rgb = np.arcsinh(8.0 * rgb / hi) / np.arcsinh(8.0)
+    return np.clip(rgb, 0.0, 1.0)
+
+
+def _row_rgb_previews(
+    source_image: np.ndarray,
+    raw_image: np.ndarray,
+    final_image: np.ndarray,
+    stretch: str,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    if stretch == "independent":
+        return _rgb_preview(source_image), _rgb_preview(raw_image), _rgb_preview(final_image)
+    if stretch != "shared":
+        raise ValueError("--stretch doit valoir shared ou independent.")
+    source_linear, raw_linear, final_linear = denormalize_images(
+        np.stack([source_image, raw_image, final_image], axis=0)
+    )
+    channels = [3, 2, 1] if source_linear.shape[0] >= 4 else list(range(min(3, source_linear.shape[0])))[::-1]
+    combined = np.concatenate(
+        [
+            np.clip(source_linear[channels], 0.0, None).ravel(),
+            np.clip(raw_linear[channels], 0.0, None).ravel(),
+            np.clip(final_linear[channels], 0.0, None).ravel(),
+        ]
+    )
+    hi = _finite_quantile(combined, 0.995, 1.0)
+    return (
+        _rgb_preview_fixed_hi(source_linear, hi),
+        _rgb_preview_fixed_hi(raw_linear, hi),
+        _rgb_preview_fixed_hi(final_linear, hi),
+    )
+
+
+def _median_relative_l1(source_images: np.ndarray, target_images: np.ndarray) -> np.ndarray:
+    metrics = bandwise_visual_metrics(source_images, target_images)
+    return np.nanmedian(metrics["relative_l1"], axis=1)
 
 
 def _plot_stage_contact_sheet(
@@ -143,21 +199,31 @@ def _plot_stage_contact_sheet(
     source_indices: np.ndarray,
     raw_indices: np.ndarray,
     final_indices: np.ndarray,
+    raw_change: np.ndarray,
+    fusion_effect: np.ndarray,
     output_path: str,
     title: str,
+    stretch: str,
 ) -> None:
     n = len(final_indices)
     if n == 0:
         return
-    fig, axes = plt.subplots(n, 3, figsize=(7.8, 2.35 * n))
+    fig, axes = plt.subplots(n, 3, figsize=(9.2, 2.75 * n))
     if n == 1:
         axes = np.asarray([axes])
     for row in range(n):
-        axes[row, 0].imshow(_rgb_preview(source_images[row]), origin="lower")
-        axes[row, 1].imshow(_rgb_preview(raw_images[row]), origin="lower")
-        axes[row, 2].imshow(_rgb_preview(final_images[row]), origin="lower")
+        source_rgb, raw_rgb, final_rgb = _row_rgb_previews(
+            source_images[row],
+            raw_images[row],
+            final_images[row],
+            stretch=stretch,
+        )
+        axes[row, 0].imshow(source_rgb, origin="lower")
+        axes[row, 1].imshow(raw_rgb, origin="lower")
+        axes[row, 2].imshow(final_rgb, origin="lower")
         axes[row, 0].set_ylabel(
-            f"src {int(source_indices[row])}\nraw {int(raw_indices[row])}\nfinal {int(final_indices[row])}",
+            f"src {int(source_indices[row])}\nraw {int(raw_indices[row])}\nfinal {int(final_indices[row])}\n"
+            f"raw L1 {raw_change[row]:.2f}\nfusion L1 {fusion_effect[row]:.2f}",
             fontsize=7,
         )
         if row == 0:
@@ -167,7 +233,7 @@ def _plot_stage_contact_sheet(
         for col in range(3):
             axes[row, col].set_xticks([])
             axes[row, col].set_yticks([])
-    fig.suptitle(title, y=0.995, fontsize=15)
+    fig.suptitle(title, y=0.997, fontsize=15)
     plt.tight_layout()
     plt.savefig(output_path, dpi=150)
     plt.close()
@@ -177,6 +243,8 @@ def _example_rows(
     source_indices: np.ndarray,
     raw_indices: np.ndarray,
     final_indices: np.ndarray,
+    raw_change: np.ndarray,
+    fusion_effect: np.ndarray,
     raw_path: Optional[str],
     final_path: str,
 ) -> List[Dict[str, object]]:
@@ -187,6 +255,8 @@ def _example_rows(
             "source_index": int(src_idx),
             "raw_i2i_index": int(raw_idx),
             "final_fused_index": int(final_idx),
+            "median_l1_source_to_raw_i2i": float(raw_change[pos]),
+            "median_l1_raw_i2i_to_final_fused": float(fusion_effect[pos]),
             "raw_i2i_file": raw_path or "reconstructed_from_final_blend_metadata",
             "final_fused_file": final_path,
         })
@@ -231,10 +301,12 @@ def run(args: argparse.Namespace) -> None:
     else:
         final_rows = _select_final_rows(
             all_source_images,
+            all_raw_images,
             all_final_images,
             max_examples=args.max_examples,
             seed=args.seed,
             selection=args.selection,
+            selection_metric=args.selection_metric,
         )
 
     source_images = all_source_images[final_rows]
@@ -242,6 +314,8 @@ def run(args: argparse.Namespace) -> None:
     final_images = all_final_images[final_rows]
     source_indices = final_source[final_rows]
     raw_indices = raw_to_final[final_rows]
+    raw_change = _median_relative_l1(source_images, raw_images)
+    fusion_effect = _median_relative_l1(raw_images, final_images)
 
     contact_path = os.path.join(output_dir, args.output_name)
     _plot_stage_contact_sheet(
@@ -251,12 +325,23 @@ def run(args: argparse.Namespace) -> None:
         source_indices,
         raw_indices,
         final_rows,
+        raw_change,
+        fusion_effect,
         contact_path,
         title=args.title,
+        stretch=args.stretch,
     )
     write_rows_csv(
         os.path.join(output_dir, "i2i_stage_examples.csv"),
-        _example_rows(source_indices, raw_indices, final_rows, args.raw_augmentations, args.final_augmentations),
+        _example_rows(
+            source_indices,
+            raw_indices,
+            final_rows,
+            raw_change,
+            fusion_effect,
+            args.raw_augmentations,
+            args.final_augmentations,
+        ),
     )
 
     with open(os.path.join(output_dir, "i2i_stage_comparison_report.md"), "w") as f:
@@ -265,6 +350,8 @@ def run(args: argparse.Namespace) -> None:
             f"- Raw i2i file: `{args.raw_augmentations}`\n"
             f"- Final fused file: `{args.final_augmentations}`\n"
             f"- Figure: `{args.output_name}`\n\n"
+            f"- RGB stretch: `{args.stretch}`\n"
+            f"- Selection metric: `{args.selection_metric}`\n\n"
             "Columns:\n\n"
             "1. Source real image.\n"
             "2. Raw i2i output generated by the CFM, loaded from raw_augmentations or reconstructed from blend metadata.\n"
@@ -291,6 +378,8 @@ if __name__ == "__main__":
     parser.add_argument("--split_strategy", choices=["spatial", "marie_regular", "marie_strict"], default="spatial")
     parser.add_argument("--max_examples", type=int, default=8)
     parser.add_argument("--selection", choices=["mixed", "random", "largest_change"], default="mixed")
+    parser.add_argument("--selection_metric", choices=["raw_change", "final_change", "fusion_effect"], default="raw_change")
+    parser.add_argument("--stretch", choices=["shared", "independent"], default="shared")
     parser.add_argument("--example_indices", type=str, default=None)
     parser.add_argument("--seed", type=int, default=CONFIG.SEED)
     run(parser.parse_args())
