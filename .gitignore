@@ -30,6 +30,15 @@ cfm_v1/
 models_weights/
 (outdated)/
 
+# Assets locaux de rapports / reunion / memoire
+reports/meeting_assets_*/
+reports/*.md
+reports/*.pdf
+reports/*.html
+reports/*.docx
+reports/*.pptx
+reports/*.xlsx
+
 # Environnement & Config locale
 .env
 .env.*

@@ -1,362 +1,227 @@
-# Redshift CFM Predictions
+# Redshift Photo-z: Marie/Treyer Baseline and OT-CFM i2i Augmentation
 
-Pipeline de recherche pour l'estimation de redshift photometrique sur COSMOS avec:
+This repository contains research code for photometric redshift estimation on COSMOS Ultra Deep, with a focus on evaluating whether OT-CFM image-to-image augmentation can improve a Marie/Treyer-style baseline on difficult photometric regions.
 
-- generateur Conditional Flow Matching conditionne par redshift, magnitude, couleurs et morphologie;
-- backbone G-CNN equivariant avec tete Mixture Density Network;
-- experiences Sim2Real, deep ensembles et diagnostics d'incertitude.
+## Current Scientific Scope
+
+The current project should be understood in this order:
+
+1. Reproduce a credible Marie/Treyer-style photo-z baseline.
+2. Use a strict train/validation/test protocol with no test leakage.
+3. Define difficult galaxies by low photometric support, not by sky position.
+4. Generate targeted OT-CFM image-to-image augmentations.
+5. Filter, recalibrate, or blend augmentations to preserve labels.
+6. Evaluate on real test images only.
+
+Main conclusion so far:
+
+```text
+OT-CFM i2i augmentation is useful as a diagnostic and weak regularizer, but it does not yet robustly improve the Marie/Treyer baseline on faint, low-photometric-support galaxies.
+```
+
+## Important Files
+
+Core dataset and metrics:
+
+- `config.py`: shared configuration and default paths.
+- `data_loader.py`: COSMOS loading, filtering, metadata and split construction.
+- `analysis_utils.py`: metrics, split helpers, metadata exports and audit utilities.
+- `analyze_photometric_support.py`: kNN-based low photometric support analysis.
+
+Marie/Treyer baseline:
+
+- `marie_treyer_exact.py`: Marie/Treyer-style model.
+- `experiment_marie_exact_augmented.py`: real-only and augmented training/evaluation.
+- `analyze_marie_cv_folds.py`: analysis of provided Marie/Treyer CV folds.
+- `analyze_treyer_figure7.py`: Figure 7-style diagnostics.
+
+OT-CFM and i2i augmentation:
+
+- `model.py`: conditional flow model.
+- `cfm_conditioning.py`: conditioning strategies.
+- `train.py`: CFM training.
+- `generate_cfm_i2i.py`: image-to-image generation.
+- `photometric_validation.py`: photometric filtering of candidates.
+- `visual_band_inspection.py`: multi-band visual/flux diagnostics.
+- `renormalize_i2i_flux.py`: per-band source-flux recalibration.
+- `blend_i2i_with_source.py`: residual blending with the source image.
+- `plot_i2i_stage_comparison.py`: source / raw i2i / final fused image comparison.
+
+Tests:
+
+- `tests/`: unit/smoke tests for split logic, conditioning, density support, filtering and visual diagnostics.
 
 ## Installation
 
-Le projet est un ensemble de scripts Python. Les chemins de donnees ne sont pas inclus dans le depot.
+From repository root:
 
 ```bash
-export REDSHIFT_ENV=/chemin/avec/espace/venvs/redshift
-export PIP_CACHE_DIR=/chemin/avec/espace/pip-cache
-export TMPDIR=/chemin/avec/espace/tmp
-mkdir -p "$PIP_CACHE_DIR" "$TMPDIR" "$(dirname "$REDSHIFT_ENV")"
-
-python3.8 -m venv "$REDSHIFT_ENV"
-source "$REDSHIFT_ENV/bin/activate"
+python3.8 -m venv /path/to/venvs/redshift
+source /path/to/venvs/redshift/bin/activate
 python -m pip install --upgrade pip setuptools wheel
 python -m pip install --no-cache-dir -r requirements.txt
 ```
 
-Ne pas installer dans un environnement partage non inscriptible du type `/home/grp1/.../lib/python3.8/site-packages`. Si `pip` renvoie `Permission denied`, recreer un venv dans un espace ou vous avez les droits. Si `pip` renvoie `No space left on device`, placer `REDSHIFT_ENV`, `PIP_CACHE_DIR` et `TMPDIR` sur un disque projet/scratch avec plusieurs Go libres: les wheels CUDA de PyTorch sont volumineux.
+The root `requirements.txt` delegates to `redshift/requirements.txt`.
 
-Les dependances sont separees:
-
-- `redshift/requirements-core.txt`: analyse, figures, FITS, CSV, sans PyTorch.
-- `redshift/requirements-torch.txt`: pile complete pour entrainements Torch/G-CNN.
-- `requirements.txt`: installation complete par defaut.
-
-Si le serveur fournit deja PyTorch via un module ou un environnement central, activer ce module puis installer seulement les dependances manquantes:
+If PyTorch is already provided by the server environment, install only the non-torch stack and the missing ML packages as needed:
 
 ```bash
 python -m pip install --no-cache-dir -r redshift/requirements-core.txt
 python -m pip install --no-cache-dir escnn
 ```
 
-Pour une execution reproductible, declarer explicitement les chemins locaux:
+## Data and Environment
+
+Large data, checkpoints, generated images and experiment folders are intentionally not versioned.
+
+Typical server paths:
 
 ```bash
-export COSMOS_DATA_PATH=/chemin/vers/les/fichiers_npz_cosmos
-export COSMOS_MORPHO_PATH=/chemin/vers/catalogue_morpho_cosmos.fits
-export COSMOS_EXP_FOLDER=/chemin/vers/le/dossier_experiences
-export COSMOS_METADATA_PATH=/chemin/optionnel/vers/dataset_metadata.npz
-export COSMOS_PROCESSED_DATASET_PATH=/chemin/optionnel/vers/processed_cosmos_all.npz
+export COSMOS_DATA_PATH=/home/barrage/SPECT_COSMOS_US/us
+export COSMOS_MORPHO_PATH=/home/data/hugo/catalogs/catalogue_morpho_cosmos.fits
+export COSMOS_EXP_FOLDER=/home/data/hugo/experiments/marie_exact_cfm_dafusion_fold0
+export COSMOS_PROCESSED_DATASET_PATH=/home/data/hugo/experiments/marie_lowmag_overnight_fold0_20260512_113005/processed_cosmos_ud_spec_with_source_file.npz
 export COSMOS_SEED=42
-export COSMOS_NUM_WORKERS=2
-export COSMOS_SYNTH_NUM_WORKERS=4
+export COSMOS_NUM_WORKERS=0
 ```
 
-Les chemins, seeds, batch sizes, workers et noms d'artefacts canoniques sont centralises dans `config.py`. Les scripts peuvent encore surcharger certains parametres en CLI, mais leurs valeurs par defaut viennent de `CONFIG`.
+Keep heavy files outside the git repository:
 
-Pour eviter de refaire le cross-match FITS/NPZ a chaque experience, definir `COSMOS_PROCESSED_DATASET_PATH` vers un fichier `.npz` sur un disque avec assez d'espace. Au premier chargement complet, le dataset pretraite est sauvegarde; les scripts suivants le rechargent directement. Ne pas utiliser ce cache avec `--max_files`, et utiliser un cache distinct par region (`all`, `stripe82`) si besoin.
+- FITS/NPZ datasets;
+- Marie fold tar archives;
+- `.pt/.pth` checkpoints;
+- generated i2i candidates;
+- full experiment folders.
 
-## Structure
+## Strict Protocol
 
-- `config.py`: configuration globale, chemins, bornes de selection, constantes et hyperparametres par defaut.
-- `data_loader.py`: chargement COSMOS, filtrage, cross-match morphologique et split spatial train/val/test.
-- `analysis_utils.py`: metriques, binning, masque Stripe82, exports metadata et helpers CSV.
-- `model.py`: CFM conditionnel, U-Net leger et perte photometrique.
-- `backbone.py`: G-CNN equivariant et tete MDN pour l'estimation probabiliste du redshift.
-- `train.py`: entrainement du generateur CFM.
-- `generate_mass.py`: generation de jeux synthetiques depuis le CFM entraine.
-- `generate_cfm_i2i.py`: augmentation DA-Fusion-like par inversion partielle CFM, ciblage par faible support en magnitude `i` et interpolation latente.
-- `photometric_validation.py`: filtrage et preuves photometriques des augmentations generees.
-- `experiment_marie_augmented.py`: ablations Marie baseline reel seul vs augmentations classiques/CFM.
-- `experiment_backbone.py`: pre-entrainement synthetique, fine-tuning reel et rapport statistique.
-- `experiment_sota.py`: ensemble G-CNN/MDN avec evaluation NMAD/outliers.
-- `experiment_uncertainty.py`: analyse PIT de la calibration.
-- `analyze_dataset.py`: audit dataset, split, distributions, flags, bandes U/I/Z.
-- `analyze_results.py`: heatmaps, agrégations par `z_pred`, bande I et cartes RA/DEC.
-- `experiment_cnn_bins.py`: CNN de classification par bins de redshift.
-- `experiment_marie_baseline.py`: baseline locale style Marie, fichiers originaux intacts.
-- `experiment_marie_gcnn.py`: premières couches G-CNN + tête style Marie.
-- `utils.py`: visualisations et metriques communes.
+Final i2i comparisons use `marie_strict`, fold 0:
 
-## Donnees Attendues
-
-`COSMOS_DATA_PATH` doit contenir des fichiers `.npz` avec au minimum:
-
-- `cube`: images multi-bandes, format attendu `[N, H, W, C]`;
-- `info`: table structuree contenant magnitude `i`, redshift spectroscopique, RA et DEC;
-- `flag` optionnel: masque qualite par objet et canal.
-
-Les sorties lourdes ne doivent pas etre versionnees: checkpoints `.pt/.pth`, datasets `.npz`, logs `.log`, figures et dossiers d'experiences sont ignores par Git.
-
-## Protocole Scientifique Canonique
-
-Utiliser ce protocole pour produire un resultat comparable et archivable.
-
-1. Preparer les donnees
-   - `COSMOS_DATA_PATH`: fichiers `.npz` COSMOS.
-   - `COSMOS_MORPHO_PATH`: catalogue FITS avec RA/DEC, rayon effectif et indice de Sersic.
-   - `COSMOS_EXP_FOLDER`: dossier unique du run, hors depot Git.
-   - Fixer `COSMOS_SEED`, `COSMOS_NUM_WORKERS` et `COSMOS_SYNTH_NUM_WORKERS`.
-
-2. Construire le split
-   - Le split est spatial et deterministe par RA dans `data_loader.py`.
-   - Les proportions canoniques sont 80% train, 10% validation, 10% test.
-   - Les folds optionnels sont des blocs RA deterministes via `--n_folds` et `--fold_id`.
-   - Les filtres canoniques sont `I_MIN <= i <= I_MAX`, `0.001 < z <= Z_MAX`, flags nuls sur les canaux selectionnes, puis cross-match morphologique a 1 arcsec.
-   - Reporter dans le journal du run le nombre d'objets train/val/test apres filtrage et cross-match.
-
-3. Entrainer le generateur
-   - Commande canonique:
-
-```bash
-python redshift/train.py --epochs 100 --batch_size 64 --lr 1e-4 --lambda_photo 0.01 --seed "$COSMOS_SEED" --data_parallel
+```text
+train = 95409
+validation = 31803
+test = 31803
 ```
 
-   - Checkpoint attendu: `cfm_model_physics.pt` dans `COSMOS_EXP_FOLDER`.
+Rules:
 
-4. Generer le jeu synthetique
-   - Commande canonique:
+- never tune on test;
+- define low-support thresholds from train only;
+- add synthetic images to train only;
+- evaluate final metrics on real test images only;
+- audit overlaps between train, validation and test.
 
-```bash
-python redshift/generate_mass.py --n 100000 --batch_size 256 --seed "$COSMOS_SEED"
+## Difficult Subset
+
+Low photometric support is defined by kNN radius in:
+
+```text
+[mag_i, g-r, r-i, i-z]
 ```
 
-   - Dataset attendu: `synthetic_cosmos_100k_v3.npz` ou chemin passe avec `--output`.
+Main target:
 
-5. Evaluer Sim2Real
-   - Commande canonique:
-
-```bash
-python redshift/experiment_sota.py --epochs_syn 45 --ft_epochs 15 --n_models 5 --num_gaussians 5 --batch_size 128 --seed "$COSMOS_SEED"
+```text
+faint_and_low_photometric_support = mag_i >= 23.5 AND low photometric support
 ```
 
-   - Resultat attendu: `results_sota_ensemble.npz` dans `COSMOS_EXP_FOLDER`.
-   - Metriques canoniques: biais moyen de `dz = (z_pred - z_true)/(1+z_true)`, `sigma_NMAD`, fraction d'outliers `|dz| > 0.15`.
+The strict real-only baseline on this target is much harder than global evaluation:
 
-6. Controler la calibration et la physique
-   - PIT:
-
-```bash
-python redshift/experiment_uncertainty.py --epochs 15 --num_gaussians 3 --batch_size 128 --seed "$COSMOS_SEED"
+```text
+global sigma_NMAD = 0.01516, RMSE = 0.24447, outliers = 3.10%
+faint + low support sigma_NMAD = 0.02237, RMSE = 0.40062, outliers = 5.43%
 ```
 
-   - Couleurs:
+## Key i2i Variants
 
-```bash
-python redshift/validation_colors.py
+Raw i2i:
+
+```text
+source image -> partial CFM perturbation -> raw generated image
 ```
 
-7. Archiver les resultats
-   - Commit Git exact ou archive du code.
-   - Variables d'environnement et commande CLI complete.
-   - Versions Python, PyTorch, CUDA et dependances.
-   - Nombre d'objets apres filtrage/cross-match et tailles train/val/test.
-   - Checkpoints, fichiers `.npz`, figures et logs dans `COSMOS_EXP_FOLDER`.
+Per-band recalibration:
 
-## Commandes
-
-Les commandes suivantes sont donnees depuis la racine du depot.
-
-Audit dataset:
-
-```bash
-python redshift/analyze_dataset.py --region all
-python redshift/analyze_dataset.py --region stripe82 --max_files 2
+```text
+image_i2i_recalibrated = image_i2i * flux_source / flux_i2i
 ```
 
-Entrainer le generateur CFM:
+Residual blending:
 
-```bash
-python redshift/train.py --epochs 100 --batch_size 64 --lr 1e-4 --lambda_photo 0.01 --seed "$COSMOS_SEED" --data_parallel
+```text
+image_final = image_source + alpha * (image_i2i_raw - image_source)
 ```
 
-Generer un dataset synthetique:
+Best visual compromise so far:
 
-```bash
-python redshift/generate_mass.py --n 100000 --batch_size 256 --seed "$COSMOS_SEED"
+```text
+alpha = 0.75
 ```
 
-Lancer l'experience ensemble G-CNN/MDN:
+Important interpretation:
 
-```bash
-python redshift/experiment_sota.py --epochs_syn 45 --ft_epochs 15 --n_models 5 --num_gaussians 5 --batch_size 128 --seed "$COSMOS_SEED" --region all
-python redshift/experiment_sota.py --epochs_syn 1 --ft_epochs 1 --n_models 1 --limit_batches 2 --fold_id 0
+```text
+The CFM output is a full image, not a noise or delta map. Difference maps are diagnostics only.
 ```
 
-Analyser les resultats:
+## Reports and Meeting Assets
 
-```bash
-python redshift/analyze_results.py --results "$COSMOS_EXP_FOLDER/results_sota_ensemble.npz"
-```
+Current local context and report files are in the repository root and `reports/`:
 
-Nouvelles experiences demandees:
+- `PROJECT_CONTEXT_NEW_CHAT.md`: compact context for continuing the memoir discussion.
+- `reports/suivi_experience_i2i_strict_low_photo.md`: chronological experiment tracking.
+- `reports/rapport_reunion_i2i_strict_faible_support_20260518.md`: meeting/report synthesis.
+- `reports/rapport_reunion_i2i_strict_faible_support_20260518.pdf`: rendered report.
+- `reports/script_oral_reunion_i2i_strict_faible_support_20260518.md`: oral script.
+- `reports/meeting_assets_20260518/`: curated figures and CSV diagnostics kept for the memoir.
 
-```bash
-python redshift/experiment_cnn_bins.py --epochs 10 --region all
-python redshift/experiment_marie_baseline.py --epochs 10 --region all
-python redshift/experiment_marie_gcnn.py --epochs 10 --region all
-python redshift/experiment_cnn_bins.py --epochs 1 --region stripe82 --limit_batches 2
-```
+Older exploratory reports and full generated artifacts have been removed from the working tree.
 
-Analyser la calibration PIT:
+## Useful Commands
 
-```bash
-python redshift/experiment_uncertainty.py --epochs 15 --num_gaussians 3 --batch_size 128 --seed "$COSMOS_SEED"
-```
-
-Lancer les smoke tests sans donnees lourdes:
+Run tests:
 
 ```bash
 python -m unittest discover -s redshift/tests -v
 ```
 
-Priorite actuelle: reproduire Marie/Treyer avant augmentation:
-
-Reference officielle Marie/Treyer depuis les 5 folds fournis:
+Analyze strict real baseline support:
 
 ```bash
-# Analyse directe depuis le tar, sans extraction complete.
-python redshift/analyze_marie_cv_folds.py \
-  --folds_tar "$COSMOS_EXP_FOLDER/exp00000001_complete.tar" \
-  --output_dir "$COSMOS_EXP_FOLDER/marie_cv_concat_reference" \
-  --bootstrap 100 \
-  --strict_unique_indices
-
-# Sorties principales:
-# - predictions_marie_cv_concat.npz
-# - metadata_marie_cv_concat.npz
-# - metrics_by_fold.csv
-# - metrics_global.csv
-# - metrics_by_z_true.csv
-# - metrics_by_mag_i.csv
-# - metrics_by_z_true_marie_style.csv
-# - metrics_by_mag_i_marie_style.csv
-# - metrics_by_mag_support_cv.csv
-# - figure7_like_treyer.png
-# - figure7_marie_style.png
+python redshift/analyze_photometric_support.py \
+  --predictions "$EXP/marie_exact_strict_fold0_real/predictions_marie_exact_real.npz" \
+  --metadata "$EXP/marie_exact_strict_fold0_real/dataset_metadata_marie_exact.npz" \
+  --output_dir "$EXP/marie_exact_strict_fold0_real/photometric_support_real" \
+  --k 10 \
+  --low_fraction 0.20
 ```
 
+Plot source / raw i2i / final fused images:
+
 ```bash
-# Baseline Marie/Treyer sur COSMOS Ultra Deep spectroscopique uniquement.
-# Si le cache courant ne contient pas la colonne field, reconstruire un cache depuis les NPZ sources.
-python redshift/experiment_marie_treyer_baseline.py \
-  --architecture wide \
-  --field cosmos_ud \
-  --sample_filter spec \
+python redshift/plot_i2i_stage_comparison.py \
+  --final_augmentations "$EXP/cfm_i2i_faint_low_photo_strict_fold0_legacy_blend_a0p75_visualfiltered.npz" \
+  --output_dir "$EXP/stage_i2i_legacy_blend_a0p75" \
+  --split_strategy marie_strict \
   --fold_id 0 \
   --n_folds 5 \
-  --epochs 150 \
-  --patience 25 \
-  --batch_size 64 \
-  --num_workers "$COSMOS_NUM_WORKERS" \
-  --output_dir "$COSMOS_EXP_FOLDER/marie_treyer_baseline_fold0_seed${COSMOS_SEED}" \
-  --seed "$COSMOS_SEED" \
-  --data_parallel
-
-# Les sorties importantes:
-# - metrics_marie_treyer_baseline.csv
-# - figure7_like/figure7_like_treyer.png
-# - figure7_like/metrics_by_z_true.csv
-# - figure7_like/metrics_by_mag_i.csv
-# - figure7_like/metrics_by_mag_support.csv
-```
-
-Relancer les seeds principales avec le meme cross:
-
-```bash
-for SEED in 42 43 44; do
-  python redshift/experiment_marie_treyer_baseline.py \
-    --architecture wide \
-    --field cosmos_ud \
-    --sample_filter spec \
-    --fold_id 0 \
-    --n_folds 5 \
-    --epochs 150 \
-    --patience 25 \
-    --batch_size 64 \
-    --num_workers "$COSMOS_NUM_WORKERS" \
-    --output_dir "$COSMOS_EXP_FOLDER/marie_treyer_baseline_fold0_seed${SEED}" \
-    --seed "$SEED" \
-    --data_parallel
-done
-```
-
-Pipeline augmentation DA-Fusion-like pour Marie baseline:
-
-Note: ce pipeline est exploratoire et ne doit etre relance qu'apres validation de la baseline Marie/Treyer et de la figure type Treyer Figure 7. Le ciblage principal n'est plus la densite RA/DEC: il porte sur les bins de magnitude `i` les moins representes dans le train.
-
-```bash
-# 1. Generer des candidats depuis vraies galaxies dans les bins mag_i peu representes.
-python redshift/generate_cfm_i2i.py \
-  --mode i2i \
-  --selection_target low_mag_support \
   --field cosmos_ud \
   --sample_filter spec \
-  --mag_i_bins 14 \
-  --low_mag_support_quantile 0.20 \
-  --n_folds 5 \
-  --fold_id "$FOLD_ID" \
-  --checkpoint "$COSMOS_EXP_FOLDER/cfm_model_physics.pt" \
-  --output "$COSMOS_EXP_FOLDER/cfm_aug_candidates_i2i_lowmag.npz" \
-  --n_aug_per_source 2 \
-  --t0 0.25 \
-  --noise_scale 0.02 \
-  --data_parallel
-
-# 2. Filtrer et documenter la coherence photometrique.
-python redshift/photometric_validation.py \
-  --candidates "$COSMOS_EXP_FOLDER/cfm_aug_candidates_i2i_lowmag.npz" \
-  --selection_target low_mag_support \
-  --field cosmos_ud \
-  --sample_filter spec \
-  --mag_i_bins 14 \
-  --low_mag_support_quantile 0.20 \
-  --n_folds 5 \
-  --fold_id "$FOLD_ID" \
-  --output_filtered "$COSMOS_EXP_FOLDER/cfm_aug_accepted_i2i_lowmag.npz" \
-  --output_dir "$COSMOS_EXP_FOLDER/photometry_validation_i2i_lowmag"
-
-# 3. Inspection visuelle: la sortie du CFM est l'image generee; le delta est seulement un diagnostic.
-python redshift/visual_band_inspection.py \
-  --augmentations "$COSMOS_EXP_FOLDER/cfm_aug_accepted_i2i_lowmag.npz" \
-  --output_filtered "$COSMOS_EXP_FOLDER/cfm_aug_accepted_i2i_lowmag_visualfiltered.npz" \
-  --output_dir "$COSMOS_EXP_FOLDER/visual_band_i2i_lowmag" \
-  --field cosmos_ud \
-  --sample_filter spec \
-  --n_folds 5 \
-  --fold_id "$FOLD_ID" \
-  --mode_filter i2i
-
-# 4. Entrainer/evaluer uniquement la baseline Marie avec ablations et test reel.
-python redshift/experiment_marie_augmented.py \
-  --ablations real classic classic_i2i \
-  --synthetic_i2i "$COSMOS_EXP_FOLDER/cfm_aug_accepted_i2i_lowmag_visualfiltered.npz" \
-  --filter_synthetic_mode \
-  --subset_strategy mag_support \
-  --field cosmos_ud \
-  --sample_filter spec \
-  --mag_i_bins 14 \
-  --low_mag_support_quantile 0.20 \
-  --n_folds 5 \
-  --fold_id "$FOLD_ID" \
-  --output_dir "$COSMOS_EXP_FOLDER/marie_augmented_i2i_lowmag" \
-  --data_parallel
+  --max_examples 8 \
+  --selection mixed
 ```
 
-Smoke test rapide du pipeline:
+## Memoir Positioning
 
-```bash
-python redshift/generate_cfm_i2i.py --mode i2i --selection_target low_mag_support --limit_sources 4 --n_aug_per_source 1 --batch_size 2 --steps 2
-python redshift/photometric_validation.py --candidates "$COSMOS_EXP_FOLDER/cfm_aug_candidates_i2i.npz" --selection_target low_mag_support --max_reference 64
-python redshift/experiment_marie_augmented.py --ablations real classic --subset_strategy mag_support --epochs 1 --limit_batches 2
+Do not claim:
+
+```text
+The CFM significantly improves Marie/Treyer.
 ```
 
-## Reproductibilite
+Defensible claim:
 
-Avant de comparer des resultats, noter dans le dossier d'experience:
-
-- commit Git ou archive exacte du code;
-- valeurs de `COSMOS_DATA_PATH` et `COSMOS_EXP_FOLDER`;
-- nombre d'objets apres filtrage et cross-match;
-- hyperparametres CLI utilises;
-- versions Python, PyTorch, CUDA et dependances.
-
-Les scripts actuels restent des scripts de recherche. Les sorties de reference doivent etre archivees dans `COSMOS_EXP_FOLDER`, pas dans le depot.
+```text
+Under a strict protocol, label-preserving i2i augmentation for photo-z is highly constrained. The main bottleneck is preserving multi-band physical information: fluxes, colors, local spatial structure, background and neighbors. Current OT-CFM augmentations provide useful diagnostics but no robust improvement on the faint, low-support target subset.
+```
