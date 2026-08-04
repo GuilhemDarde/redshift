@@ -27,6 +27,7 @@ Core dataset and metrics:
 - `data_loader.py`: COSMOS loading, filtering, metadata and split construction.
 - `analysis_utils.py`: metrics, split helpers, metadata exports and audit utilities.
 - `analyze_photometric_support.py`: kNN-based low photometric support analysis.
+- `diagnose_performance_ceiling.py`: train-support, local-redshift-ambiguity and model-error surfaces.
 
 Marie/Treyer baseline:
 
@@ -193,6 +194,18 @@ python redshift/analyze_photometric_support.py \
   --predictions "$EXP/marie_exact_strict_fold0_real/predictions_marie_exact_real.npz" \
   --metadata "$EXP/marie_exact_strict_fold0_real/dataset_metadata_marie_exact.npz" \
   --output_dir "$EXP/marie_exact_strict_fold0_real/photometric_support_real" \
+  --k 10 \
+  --low_fraction 0.20
+```
+
+Diagnose whether the model is limited by data support, local redshift ambiguity or model error:
+
+```bash
+python redshift/diagnose_performance_ceiling.py \
+  --predictions "$EXP/marie_exact_strict_fold0_real/predictions_marie_exact_real.npz" \
+  --metadata "$EXP/marie_exact_strict_fold0_real/dataset_metadata_marie_exact.npz" \
+  --output_dir "$EXP/marie_exact_strict_fold0_real/performance_ceiling" \
+  --feature_space classic_colors \
   --k 10 \
   --low_fraction 0.20
 ```
