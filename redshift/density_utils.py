@@ -172,6 +172,61 @@ def standardized_knn_radius(
     return radius
 
 
+def local_label_dispersion(
+    features: np.ndarray,
+    reference_indices: np.ndarray,
+    labels: np.ndarray,
+    k: int = 10,
+) -> np.ndarray:
+    '''
+    actions : Mesure la dispersion robuste des labels des k voisins de reference dans un espace de features standardise sur la reference.
+    inputs : features (np.ndarray), reference_indices (np.ndarray), labels (np.ndarray), k (int)
+    appels : np.nanmean, np.nanstd, _query_knn_distances, np.median
+    outputs : np.ndarray
+    '''
+    features = np.asarray(features, dtype=np.float64)
+    reference_indices = np.asarray(reference_indices, dtype=np.int64)
+    labels = np.asarray(labels, dtype=np.float64)
+    if features.ndim != 2:
+        raise ValueError("features doit etre une matrice 2D.")
+    if reference_indices.size < 2:
+        return np.full(features.shape[0], np.nan, dtype=np.float64)
+
+    ref = features[reference_indices]
+    mean = np.nanmean(ref, axis=0)
+    std = np.nanstd(ref, axis=0)
+    std = np.where(np.isfinite(std) & (std > 1e-8), std, 1.0)
+    normalized = (features - mean[None, :]) / std[None, :]
+    normalized = np.nan_to_num(normalized, nan=0.0, posinf=0.0, neginf=0.0)
+    ref_normalized = normalized[reference_indices]
+
+    k_eff = int(max(1, min(k, reference_indices.size - 1)))
+    _, idx = _query_knn_distances(ref_normalized, normalized, k=min(k_eff + 1, reference_indices.size))
+    if idx.ndim == 1:
+        idx = idx[:, None]
+
+    source_pos = np.full(features.shape[0], -1, dtype=np.int64)
+    source_pos[reference_indices] = np.arange(reference_indices.size)
+    dispersion = np.full(features.shape[0], np.nan, dtype=np.float64)
+    for row in range(features.shape[0]):
+        row_idx = idx[row]
+        pos = source_pos[row]
+        if pos >= 0:
+            row_idx = row_idx[row_idx != pos]
+        row_idx = row_idx[:k_eff]
+        if row_idx.size == 0:
+            continue
+        neighbour_labels = labels[reference_indices[row_idx]]
+        neighbour_labels = neighbour_labels[np.isfinite(neighbour_labels)]
+        if neighbour_labels.size == 0:
+            continue
+        # Meme convention que diagnose_performance_ceiling: dispersion normalisee par (1+z) local.
+        median_label = float(np.median(neighbour_labels))
+        centered = (neighbour_labels - median_label) / (1.0 + median_label)
+        dispersion[row] = float(1.4826 * np.median(np.abs(centered - np.median(centered))))
+    return dispersion
+
+
 def low_support_by_radius_mask(radius: np.ndarray, reference_indices: np.ndarray, fraction: float = 0.20) -> Tuple[np.ndarray, float]:
     '''
     actions : Selectionne les objets les plus eloignes du support train selon une fraction haute de rayon kNN.

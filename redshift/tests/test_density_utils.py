@@ -9,6 +9,7 @@ import numpy as np
 from density_utils import (
     compute_catalog_knn_density,
     compute_train_knn_density,
+    local_label_dispersion,
     low_density_mask,
     low_support_by_radius_mask,
     projected_radec_coordinates,
@@ -66,6 +67,56 @@ class DensityUtilsTests(unittest.TestCase):
         self.assertTrue(np.isfinite(threshold))
         self.assertTrue(mask[-1])
         self.assertFalse(mask[1])
+
+
+class LocalLabelDispersionTests(unittest.TestCase):
+    def _two_clusters(self):
+        # Deux amas serres dans l'espace de features. Le premier a des redshifts
+        # coherents, le second des redshifts contradictoires: meme support, ambiguite opposee.
+        features = np.array([
+            [0.0, 0.0], [0.01, 0.0], [0.02, 0.0], [0.03, 0.0],
+            [9.0, 9.0], [9.01, 9.0], [9.02, 9.0], [9.03, 9.0],
+        ])
+        labels = np.array([0.50, 0.51, 0.49, 0.50, 0.50, 2.50, 0.60, 2.40])
+        return features, labels
+
+    def test_ambiguous_cluster_has_higher_dispersion(self):
+        features, labels = self._two_clusters()
+        train_idx = np.arange(len(features))
+
+        dispersion = local_label_dispersion(features, train_idx, labels, k=3)
+
+        self.assertEqual(dispersion.shape, (8,))
+        self.assertTrue(np.isfinite(dispersion).all())
+        self.assertLess(dispersion[:4].max(), dispersion[4:].min())
+
+    def test_dispersion_is_independent_of_support_radius(self):
+        features, labels = self._two_clusters()
+        train_idx = np.arange(len(features))
+
+        radius = standardized_knn_radius(features, train_idx, k=3)
+        dispersion = local_label_dispersion(features, train_idx, labels, k=3)
+
+        # Les deux amas ont une compacite comparable mais des ambiguites tres differentes:
+        # le rayon de support ne peut pas servir de proxy a l'ambiguite.
+        self.assertAlmostEqual(float(radius[:4].mean()), float(radius[4:].mean()), places=6)
+        self.assertGreater(float(dispersion[4:].mean()), 5.0 * float(dispersion[:4].mean()))
+
+    def test_non_finite_labels_do_not_crash(self):
+        features, labels = self._two_clusters()
+        labels = labels.copy()
+        labels[5] = np.nan
+        train_idx = np.arange(len(features))
+
+        dispersion = local_label_dispersion(features, train_idx, labels, k=3)
+
+        self.assertEqual(dispersion.shape, (8,))
+        self.assertTrue(np.isfinite(dispersion[:4]).all())
+
+    def test_too_few_references_returns_nan(self):
+        features = np.array([[0.0, 0.0], [1.0, 1.0]])
+        dispersion = local_label_dispersion(features, np.array([0]), np.array([0.5, 0.6]), k=3)
+        self.assertTrue(np.isnan(dispersion).all())
 
 
 if __name__ == "__main__":

@@ -576,6 +576,7 @@ def plot_ambiguity_error_relation(
     rows: List[Dict[str, object]],
     max_points: int,
     seed: int,
+    spearman_value: Optional[float] = None,
 ) -> None:
     x = np.asarray(local_ambiguity, dtype=np.float64)
     y = np.asarray(abs_dz, dtype=np.float64)
@@ -594,20 +595,48 @@ def plot_ambiguity_error_relation(
         x_plot = x
         y_plot = y
 
-    fig, ax = plt.subplots(figsize=(8, 6))
-    x_max = robust_vmax(x, 99) or float(np.max(x))
-    y_max = robust_vmax(y, 99) or float(np.max(y))
-    ax.hexbin(x_plot, y_plot, gridsize=60, mincnt=1, cmap="magma", extent=(0, x_max, 0, y_max))
     centers = np.array([row["bin_center"] for row in rows], dtype=np.float64)
     med_error = np.array([row["median_abs_dz_norm"] for row in rows], dtype=np.float64)
     valid_curve = np.isfinite(centers) & np.isfinite(med_error)
-    ax.plot(centers[valid_curve], med_error[valid_curve], color="cyan", marker="o", linewidth=1.8, label="mediane par bin")
+
+    x_max = robust_vmax(x, 99) or float(np.max(x))
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5.2))
+
+    # Panneau de gauche : densite. Comptage en echelle log, sans quoi les
+    # milliers de cellules a faible effectif saturent la carte en noir.
+    ax = axes[0]
+    y_max = robust_vmax(y, 97) or float(np.max(y))
+    hb = ax.hexbin(
+        x_plot, y_plot, gridsize=55, mincnt=1, bins="log",
+        cmap="viridis", extent=(0, x_max, 0, y_max),
+    )
+    ax.plot(centers[valid_curve], med_error[valid_curve],
+            color="red", marker="o", linewidth=2.0, markersize=5, label="mediane par bin")
     ax.set_xlim(0, x_max)
     ax.set_ylim(0, y_max)
-    ax.set_xlabel("Ambiguite locale train: sigma_NMAD(z voisins)/(1+z local)")
-    ax.set_ylabel("|z_pred - z_true|/(1+z_true)")
-    ax.set_title("Erreur modele vs ambiguite locale du probleme")
-    ax.legend()
+    ax.set_xlabel("Ambiguite locale : sigma_NMAD(z des voisins train) / (1 + z local)")
+    ax.set_ylabel("|z_pred - z_true| / (1 + z_true)")
+    ax.set_title("Densite des objets")
+    ax.legend(loc="upper right", framealpha=0.9)
+    plt.colorbar(hb, ax=ax, label="nombre d'objets (echelle log)")
+
+    # Panneau de droite : la relation elle-meme, a son echelle propre.
+    ax = axes[1]
+    ax.plot(centers[valid_curve], med_error[valid_curve],
+            color="tab:red", marker="o", linewidth=2.0, markersize=6)
+    ax.set_xlabel("Ambiguite locale (bins de quantile)")
+    ax.set_ylabel("erreur absolue mediane normalisee")
+    ax.set_title("Relation dose-reponse")
+    ax.grid(True, alpha=0.3)
+    if spearman_value is not None and np.isfinite(spearman_value):
+        ax.annotate(
+            f"Spearman = {spearman_value:+.3f}",
+            xy=(0.04, 0.92), xycoords="axes fraction",
+            fontsize=11, fontweight="bold",
+            bbox=dict(boxstyle="round,pad=0.4", facecolor="white", edgecolor="tab:red", alpha=0.9),
+        )
+
+    fig.suptitle("Erreur du modele en fonction de l'ambiguite locale du probleme", fontsize=13)
     fig.tight_layout()
     fig.savefig(output_path, dpi=160)
     plt.close(fig)
@@ -809,6 +838,7 @@ def run(args: argparse.Namespace) -> None:
         ambiguity_rows,
         max_points=args.max_scatter_points,
         seed=args.seed,
+        spearman_value=summary["spearman_abs_error_vs_local_ambiguity"],
     )
     plot_support_curves(os.path.join(output_dir, "ceiling_support_curves.png"), support_rows)
     write_markdown_report(os.path.join(output_dir, "ceiling_diagnostic_report.md"), summary, feature_names)

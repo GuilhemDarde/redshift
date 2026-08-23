@@ -13,7 +13,13 @@ from analysis_utils import magnitude_bin_edges, magnitude_support_definition_row
 from cfm_conditioning import build_cfm_condition, condition_choices, condition_dim
 from config import CONFIG
 from data_loader import build_metadata, get_dataset_and_splits
-from density_utils import compute_train_knn_density, low_density_mask, low_support_by_radius_mask, standardized_knn_radius
+from density_utils import (
+    compute_train_knn_density,
+    local_label_dispersion,
+    low_density_mask,
+    low_support_by_radius_mask,
+    standardized_knn_radius,
+)
 from model import ConditionalFlowMatching
 from utils import set_global_seed
 
@@ -191,6 +197,9 @@ def select_source_pool(
     photometric_radius = np.full(n, np.nan, dtype=np.float64)
     photometric_threshold = float("nan")
     low_photo_mask = np.zeros(n, dtype=bool)
+    ambiguity = np.full(n, np.nan, dtype=np.float64)
+    ambiguity_threshold = float("nan")
+    low_ambiguity_mask = np.zeros(n, dtype=bool)
 
     mag_edges = magnitude_bin_edges(args.mag_i_min, args.mag_i_max, args.mag_i_bins)
     low_mag_mask, mag_threshold, mag_support, mag_bin, mag_counts = magnitude_support_mask(
@@ -230,6 +239,28 @@ def select_source_pool(
         else:
             target_description = f"low_photometric_support radius>={photometric_threshold:.6g}"
         selected_pool = train_indices[selected]
+    elif args.selection_target == "low_support_low_ambiguity":
+        # Cible ou l'augmentation a une chance mecanique: donnees rares (support faible)
+        # ET relation couleurs->redshift bien determinee (ambiguite locale faible).
+        features = photometric_support_features(metadata)
+        photometric_radius = standardized_knn_radius(features, train_indices, k=args.photometric_support_k)
+        low_photo_mask, photometric_threshold = low_support_by_radius_mask(
+            photometric_radius,
+            train_indices,
+            fraction=args.low_photometric_support_fraction,
+        )
+        ambiguity = local_label_dispersion(features, train_indices, metadata["z_true"], k=args.photometric_support_k)
+        train_ambiguity = ambiguity[train_indices]
+        finite_ambiguity = train_ambiguity[np.isfinite(train_ambiguity)]
+        if finite_ambiguity.size == 0:
+            raise ValueError("Ambiguite locale non calculable sur le train: labels z_true manquants ou non finis.")
+        ambiguity_threshold = float(np.quantile(finite_ambiguity, args.low_ambiguity_quantile))
+        low_ambiguity_mask = np.isfinite(ambiguity) & (ambiguity <= ambiguity_threshold)
+        selected_pool = train_indices[low_photo_mask[train_indices] & low_ambiguity_mask[train_indices]]
+        target_description = (
+            f"low_support_low_ambiguity radius>={photometric_threshold:.6g} "
+            f"ambiguity<={ambiguity_threshold:.6g}"
+        )
     elif args.selection_target == "low_density":
         density, radius = compute_train_knn_density(metadata["ra"], metadata["dec"], train_indices, k=args.knn_k)
         low_density, density_threshold = low_density_mask(density, train_indices, quantile=args.low_density_quantile)
@@ -251,6 +282,9 @@ def select_source_pool(
         "photometric_support_radius": photometric_radius,
         "low_photometric_support_mask": low_photo_mask,
         "low_photometric_support_threshold": photometric_threshold,
+        "local_ambiguity": ambiguity,
+        "low_ambiguity_mask": low_ambiguity_mask,
+        "low_ambiguity_threshold": ambiguity_threshold,
         "target_description": target_description,
     }
     return np.asarray(selected_pool, dtype=np.int64), context
@@ -455,6 +489,8 @@ def run(args: argparse.Namespace) -> None:
         photometric_support_radius=target_context["photometric_support_radius"][source_idx],
         low_photometric_support_threshold=np.array(target_context["low_photometric_support_threshold"], dtype=np.float64),
         low_photometric_support_fraction=np.array(args.low_photometric_support_fraction, dtype=np.float64),
+        local_ambiguity=target_context["local_ambiguity"][source_idx],
+        low_ambiguity_threshold=np.array(target_context["low_ambiguity_threshold"], dtype=np.float64),
         condition_schema=np.array(resolved_schema),
     )
     write_rows_csv(
@@ -484,9 +520,18 @@ if __name__ == "__main__":
     parser.add_argument("--split_strategy", choices=["spatial", "marie_regular", "marie_strict"], default="spatial")
     parser.add_argument(
         "--selection_target",
-        choices=["low_mag_support", "low_photometric_support", "faint_low_photometric_support", "faint_mag", "all_train", "low_density"],
+        choices=[
+            "low_mag_support",
+            "low_photometric_support",
+            "faint_low_photometric_support",
+            "low_support_low_ambiguity",
+            "faint_mag",
+            "all_train",
+            "low_density",
+        ],
         default="low_mag_support",
     )
+    parser.add_argument("--low_ambiguity_quantile", type=float, default=0.50)
     parser.add_argument("--faint_mag_threshold", type=float, default=23.5)
     parser.add_argument("--mag_i_min", type=float, default=CONFIG.I_MIN)
     parser.add_argument("--mag_i_max", type=float, default=CONFIG.I_MAX)
